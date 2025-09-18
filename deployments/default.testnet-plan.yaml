@@ -1,0 +1,39 @@
+---
+id: 0
+name: Testnet deployment
+network: testnet
+stacks-node: "https://stacks-node-api.testnet.stacks.co"
+bitcoin-node: "http://blockstack:blockstacksystem@bitcoind.testnet.stacks.co:18332"
+plan:
+  batches:
+    - id: 0
+      transactions:
+        - contract-publish:
+            contract-name: startup-registry
+            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
+            cost: 775984
+            path: startex-contracts/contracts/startup-registry.clar
+            anchor-block-only: true
+            clarity-version: 2
+        - contract-publish:
+            contract-name: competition
+            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
+            cost: 778780
+            path: startex-contracts/contracts/competition.clar
+            anchor-block-only: true
+            clarity-version: 2
+        - contract-publish:
+            contract-name: scoring-system
+            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
+            cost: 778221
+            path: startex-contracts/contracts/scoring-system.clar
+            anchor-block-only: true
+            clarity-version: 2
+        - contract-publish:
+            contract-name: token-factory
+            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
+            cost: 776683
+            path: startex-contracts/contracts/token-factory.clar
+            anchor-block-only: true
+            clarity-version: 2
+      epoch: "2.4"
