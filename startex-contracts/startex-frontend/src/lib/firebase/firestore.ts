@@ -229,3 +229,17 @@ export const convertTimestamps = <T extends Record<string, unknown>>(data: T): T
 
   return result as T
 }
+// undefined'ları objeden temizler (derin)
+export function pruneUndefined<T>(obj: T): T {
+  if (obj === null || obj === undefined) return obj as any;
+  if (Array.isArray(obj)) return obj.map(pruneUndefined).filter(v => v !== undefined) as any;
+  if (typeof obj === 'object') {
+    const out: any = {};
+    for (const [k, v] of Object.entries(obj as any)) {
+      const pv = pruneUndefined(v as any);
+      if (pv !== undefined) out[k] = pv;
+    }
+    return out;
+  }
+  return obj as any;
+}

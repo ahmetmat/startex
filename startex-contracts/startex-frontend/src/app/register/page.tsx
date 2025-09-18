@@ -17,6 +17,7 @@ import {
   ScoringContract,
   waitForTransaction,
 } from '../../lib/contracts/call'
+import { upsertStartupProfileWithMetrics } from '@/lib/firebase/offchain-sync'
 
 /* ---------- UserSession tekil kurulum ---------- */
 const appConfig = new AppConfig(['store_write', 'publish_data'])
@@ -216,7 +217,10 @@ export default function StartupRegister() {
       setTxids((t) => ({ ...t, register: txRegister }))
       console.log('Startup registration tx:', txRegister)
 
-      await waitForTransaction(txRegister)
+      const registerStatus = await waitForTransaction(txRegister)
+      if (!registerStatus.ok) {
+        throw new Error(`Register transaction failed: ${registerStatus.reason ?? registerStatus.status ?? 'unknown'}`)
+      }
 
       // 2) Tokenize startup
       console.log('Step 2: Tokenizing startup...')
@@ -232,7 +236,10 @@ export default function StartupRegister() {
       setTxids((t) => ({ ...t, tokenize: txTokenize }))
       console.log('Tokenization tx:', txTokenize)
 
-      await waitForTransaction(txTokenize)
+      const tokenizeStatus = await waitForTransaction(txTokenize)
+      if (!tokenizeStatus.ok) {
+        throw new Error(`Tokenize transaction failed: ${tokenizeStatus.reason ?? tokenizeStatus.status ?? 'unknown'}`)
+      }
 
       // 3) Initialize metrics
       console.log('Step 3: Initializing metrics...')
@@ -242,7 +249,10 @@ export default function StartupRegister() {
       setTxids((t) => ({ ...t, metrics: txMetrics }))
       console.log('Metrics initialization tx:', txMetrics)
 
-      await waitForTransaction(txMetrics)
+      const metricsStatus = await waitForTransaction(txMetrics)
+      if (!metricsStatus.ok) {
+        throw new Error(`Metrics transaction failed: ${metricsStatus.reason ?? metricsStatus.status ?? 'unknown'}`)
+      }
 
       // 4) Set token address (sende bu helper kontrattan token adresini hesaplayıp çağırıyor varsayıyorum)
       console.log('Step 4: Setting token address...')
@@ -252,7 +262,33 @@ export default function StartupRegister() {
       setTxids((t) => ({ ...t, setToken: txSetToken }))
       console.log('Set token address tx:', txSetToken)
 
-      await waitForTransaction(txSetToken)
+      const setTokenStatus = await waitForTransaction(txSetToken)
+      if (!setTokenStatus.ok) {
+        throw new Error(`set-token-address transaction failed: ${setTokenStatus.reason ?? setTokenStatus.status ?? 'unknown'}`)
+      }
+
+      // 5) Sync off-chain profile + metrics snapshot
+      try {
+        if (!addr) throw new Error('Wallet address missing for Firestore sync')
+
+        const trimmedWebsite = formData.website?.trim()
+        const trimmedTwitter = formData.twitter?.trim()
+
+        await upsertStartupProfileWithMetrics({
+          id: nextId.toString(),
+          ownerAddress: addr,
+          name: formData.name.trim(),
+          description: formData.description.trim(),
+          github: formData.githubRepo.trim(),
+          ...(trimmedWebsite ? { website: trimmedWebsite } : {}),
+          ...(trimmedTwitter ? { twitter: trimmedTwitter } : {}),
+          tokenName: formData.tokenName.trim(),
+          tokenSymbol: formData.tokenSymbol.trim(),
+          totalSupply: parseInt(formData.initialSupply, 10),
+        })
+      } catch (syncError) {
+        console.error('Firebase sync error:', syncError)
+      }
 
       setCurrentStep(4)
     } catch (error: any) {

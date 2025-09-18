@@ -279,23 +279,55 @@ export const CompetitionContract = {
  * TX STATUS POLLER
  * =======================================================================================*/
 
-export async function waitForTransaction(txId: string, { attempts = 40, intervalMs = 2000 } = {}) {
+// src/lib/contracts/calls.ts  -> mevcut fonksiyonu bununla değiştir
+export async function waitForTransaction(
+  txId: string,
+  { attempts = 60, intervalMs = 2000 } = {}
+): Promise<{ ok: boolean; status?: string; reason?: string; txResult?: any }> {
+  const url = `${CORE_API_URL}/extended/v1/tx/${txId}`;
   for (let i = 0; i < attempts; i++) {
     try {
-      const r = await fetch(`${CORE_API_URL}/extended/v1/tx/${txId}`)
+      const r = await fetch(url);
       if (r.ok) {
-        const j = await r.json()
-        const s = j.tx_status
-        if (s === 'success') return true
-        if (s === 'abort_by_response' || s === 'abort_by_post_condition' || s === 'rejected') {
-          console.error('Transaction failed:', j)
-          return false
+        const j = await r.json();
+        const s: string | undefined = j?.tx_status;
+        // explorer linki logla; hemen tıklayıp bak
+        console.log(`TX [${s ?? 'unknown'}]:`, `https://explorer.hiro.so/txid/${txId}?chain=${STACKS_NETWORK}`);
+
+        if (s === 'success') return { ok: true, status: s, txResult: j?.tx_result };
+
+        if (s === 'pending' || s === 'submitted' || s === 'processing' || s === 'success_microblock') {
+          // beklemeye devam
+        } else if (s === 'abort_by_response' || s === 'abort_by_post_condition' || s === 'rejected' || s === 'failed') {
+          let serialized = 'unknown';
+          if (j) {
+            try {
+              serialized = JSON.stringify(j);
+            } catch {
+              serialized = '[unserializable tx payload]';
+            }
+          }
+
+          const reason =
+            j?.tx_failure_reason?.repr ||
+            j?.tx_failure_reason?.cause ||
+            j?.tx_result?.repr ||
+            j?.tx_result?.hex ||
+            j?.error ||
+            j?.reason ||
+            serialized;
+
+          console.error('Transaction failed details:', { status: s, reason });
+          return { ok: false, status: s, reason, txResult: j?.tx_result };
+        } else if (s) {
+          // başka final durum
+          return { ok: false, status: s, txResult: j?.tx_result };
         }
       }
     } catch (e) {
-      console.warn('waitForTransaction error', e)
+      console.warn('waitForTransaction error', e);
     }
-    await new Promise((res) => setTimeout(res, intervalMs))
+    await new Promise(res => setTimeout(res, intervalMs));
   }
-  return false
+  return { ok: false, status: 'timeout' };
 }
