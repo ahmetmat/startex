@@ -1,11 +1,11 @@
-// startex-contracts/startex-frontend/src/lib/wallet/connection.ts
+// startex-frontend/src/lib/wallet/connection.ts
 
 import { showConnect, ConnectOptions } from '@stacks/connect'
-import { StacksTestnet } from '@stacks/network'
+import { STACKS_TESTNET, StacksNetwork } from '@stacks/network'
 import { AppConfig, UserSession } from '@stacks/auth'
 
 // Network configuration
-export const network = new StacksTestnet()
+export const network: StacksNetwork = STACKS_TESTNET
 
 // App configuration
 const appConfig = new AppConfig(['store_write', 'publish_data'])
@@ -22,11 +22,7 @@ export const connectWallet = async (): Promise<string | null> => {
       redirectTo: '/',
       onFinish: (authData) => {
         console.log('Wallet connected:', authData)
-        const userData = userSession.loadUserData()
-        const address = userData.profile?.stxAddress?.testnet || 
-                       userData.profile?.stxAddress?.mainnet || 
-                       null
-        resolve(address)
+        window.location.reload()
       },
       onCancel: () => {
         console.log('Wallet connection cancelled')
@@ -40,20 +36,29 @@ export const connectWallet = async (): Promise<string | null> => {
 
 // Get user address from session
 export const getUserAddress = (): string | null => {
-  if (!userSession.isUserSignedIn()) return null
-  
-  const userData = userSession.loadUserData()
-  return userData.profile?.stxAddress?.testnet || 
-         userData.profile?.stxAddress?.mainnet || 
-         null
+  try {
+    if (!userSession.isUserSignedIn()) return null
+    
+    const userData = userSession.loadUserData()
+    return userData.profile?.stxAddress?.testnet || 
+           userData.profile?.stxAddress?.mainnet || 
+           null
+  } catch (error) {
+    return null
+  }
 }
 
 // Check if user is signed in
 export const isSignedIn = (): boolean => {
-  return userSession.isUserSignedIn()
+  try {
+    return userSession.isUserSignedIn()
+  } catch (error) {
+    return false
+  }
 }
 
 // Sign out
 export const signOut = (): void => {
   userSession.signUserOut()
+  window.location.reload()
 }

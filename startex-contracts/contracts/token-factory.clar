@@ -68,7 +68,7 @@
         token-symbol: token-symbol,
         total-supply: initial-supply,
         decimals: decimals,
-        created-at: stacks-block-height
+created-at: (default-to u0 (get-block-info? time u0))
       }
     )
     

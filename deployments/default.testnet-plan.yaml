@@ -2,7 +2,7 @@
 id: 0
 name: Testnet deployment
 network: testnet
-stacks-node: "https://stacks-node-api.testnet.stacks.co"
+stacks-node: "https://api.testnet.hiro.so"
 bitcoin-node: "http://blockstack:blockstacksystem@bitcoind.testnet.stacks.co:18332"
 plan:
   batches:
@@ -10,29 +10,29 @@ plan:
       transactions:
         - contract-publish:
             contract-name: startup-registry
-            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
-            cost: 775984
+            expected-sender: ST1M2Z6NHHY29G8FC61MYQ0HKWVB7K4KW4EZXJF87
+            cost: 40500
             path: startex-contracts/contracts/startup-registry.clar
             anchor-block-only: true
             clarity-version: 2
         - contract-publish:
             contract-name: competition
-            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
-            cost: 778780
+            expected-sender: ST1M2Z6NHHY29G8FC61MYQ0HKWVB7K4KW4EZXJF87
+            cost: 81610
             path: startex-contracts/contracts/competition.clar
             anchor-block-only: true
             clarity-version: 2
         - contract-publish:
             contract-name: scoring-system
-            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
-            cost: 778221
+            expected-sender: ST1M2Z6NHHY29G8FC61MYQ0HKWVB7K4KW4EZXJF87
+            cost: 73590
             path: startex-contracts/contracts/scoring-system.clar
             anchor-block-only: true
             clarity-version: 2
         - contract-publish:
             contract-name: token-factory
-            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
-            cost: 776683
+            expected-sender: ST1M2Z6NHHY29G8FC61MYQ0HKWVB7K4KW4EZXJF87
+            cost: 51910
             path: startex-contracts/contracts/token-factory.clar
             anchor-block-only: true
             clarity-version: 2

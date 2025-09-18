@@ -55,7 +55,7 @@
         website: website,
         twitter: twitter,
         token-address: none,
-        created-at: stacks-block-height,
+        created-at: (default-to u0 (get-block-info? time u0)),
         is-verified: false,
         total-score: u0
       }

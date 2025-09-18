@@ -6,19 +6,21 @@ import {
   AlertCircle, Sparkles, Zap, Coins,
 } from 'lucide-react'
 
-import {
-  connectWallet,
-  getUserAddress,
-  isSignedIn,
-  signOut,
-} from '@/lib/wallet/connection'
+// ❗️ CÜZDAN / OTURUM
+import { authenticate } from '@stacks/connect'
+import { AppConfig, UserSession } from '@stacks/auth'
+
+// Kontrat helper’ların senin propenden:
 import {
   RegistryContract,
   TokenContract,
   ScoringContract,
   waitForTransaction,
-} from '@/lib/contracts/calls'
-import { upsertStartupProfileWithMetrics } from '@/lib/firebase/offchain-sync'
+} from '../../lib/contracts/call'
+
+/* ---------- UserSession tekil kurulum ---------- */
+const appConfig = new AppConfig(['store_write', 'publish_data'])
+const userSession = new UserSession({ appConfig })
 
 /* ---------- TYPES ---------- */
 type FormData = {
@@ -35,12 +37,17 @@ type FormData = {
 type Errors = Partial<Record<keyof FormData, string>>
 
 export default function StartupRegister() {
-  /* Wallet state */
+  /* State */
+  const [mounted, setMounted] = useState(false)        // SSR guard
+  const [isChecking, setIsChecking] = useState(true)   // pending sign-in / initial check
   const [addr, setAddr] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
-
-  /* UI state */
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3 | 4>(1)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [errors, setErrors] = useState<Errors>({})
+  const [startupId, setStartupId] = useState<number | null>(null)
+  const [txids, setTxids] = useState<{ register?: string; tokenize?: string; metrics?: string; setToken?: string }>({})
+
   const [formData, setFormData] = useState<FormData>({
     name: '',
     description: '',
@@ -52,41 +59,98 @@ export default function StartupRegister() {
     initialSupply: '1000000',
     decimals: '6',
   })
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [errors, setErrors] = useState<Errors>({})
-  const [startupId, setStartupId] = useState<number | null>(null)
-  const [txids, setTxids] = useState<{ register?: string; tokenize?: string; metrics?: string; setToken?: string }>({})
 
-  /* -------- Wallet effect -------- */
+  /* ---------- Mount & session restore ---------- */
   useEffect(() => {
-    if (isSignedIn()) {
-      const address = getUserAddress()
-      if (address) {
-        setAddr(address)
-        setConnected(true)
+    setMounted(true)
+
+    const restore = async () => {
+      try {
+        if (userSession.isSignInPending()) {
+          // Callback’ten döndüyseniz burada finalize edilir
+          const ud: any = await userSession.handlePendingSignIn()
+          const net = (process.env.NEXT_PUBLIC_STACKS_NETWORK || 'testnet').toLowerCase()
+          const address =
+            net === 'mainnet'
+              ? ud?.profile?.stxAddress?.mainnet
+              : ud?.profile?.stxAddress?.testnet
+          if (address) {
+            setAddr(address)
+            setConnected(true)
+          }
+        } else if (userSession.isUserSignedIn()) {
+          const ud: any = userSession.loadUserData()
+          const net = (process.env.NEXT_PUBLIC_STACKS_NETWORK || 'testnet').toLowerCase()
+          const address =
+            net === 'mainnet'
+              ? ud?.profile?.stxAddress?.mainnet
+              : ud?.profile?.stxAddress?.testnet
+          if (address) {
+            setAddr(address)
+            setConnected(true)
+          }
+        }
+      } catch (e) {
+        console.error('Wallet session restore error:', e)
+        try { userSession.signUserOut() } catch {}
+        setAddr(null)
+        setConnected(false)
+      } finally {
+        setIsChecking(false)
       }
     }
+
+    restore()
   }, [])
 
+  /* ---------- Wallet handlers ---------- */
   const handleConnectWallet = async () => {
-    try {
-      const address = await connectWallet()
-      if (address) {
-        setAddr(address)
-        setConnected(true)
+    return new Promise<void>((resolve, reject) => {
+      try {
+        authenticate({
+          userSession,
+          appDetails: {
+            name: 'StartEx',
+            icon: '/logo.png',
+          },
+          redirectTo: typeof window !== 'undefined' ? window.location.pathname : '/',
+          onFinish: () => {
+            // Başarılı girişten sonra oturumu yükle
+            try {
+              const ud: any = userSession.loadUserData()
+              const net = (process.env.NEXT_PUBLIC_STACKS_NETWORK || 'testnet').toLowerCase()
+              const address =
+                net === 'mainnet'
+                  ? ud?.profile?.stxAddress?.mainnet
+                  : ud?.profile?.stxAddress?.testnet
+              if (address) {
+                setAddr(address)
+                setConnected(true)
+              }
+            } catch (e) {
+              console.error('Post-connect loadUserData error:', e)
+            }
+            resolve()
+          },
+          onCancel: () => {
+            reject(new Error('User closed wallet connect'))
+          },
+        })
+      } catch (err) {
+        reject(err)
       }
-    } catch (error) {
-      console.error('Wallet connection failed:', error)
-    }
+    })
   }
 
   const handleDisconnectWallet = () => {
-    signOut()
+    try {
+      userSession.signUserOut()
+    } catch {}
     setAddr(null)
     setConnected(false)
   }
 
-  /* -------- Validation -------- */
+  /* ---------- Validation ---------- */
   const validateStep = (step: number) => {
     const e: Errors = {}
 
@@ -120,7 +184,7 @@ export default function StartupRegister() {
     setErrors({})
   }
 
-  /* -------- Submit pipeline -------- */
+  /* ---------- Submit pipeline ---------- */
   const handleSubmit = async () => {
     if (!validateStep(currentStep)) return
     if (!connected || !addr) {
@@ -131,83 +195,64 @@ export default function StartupRegister() {
     setIsSubmitting(true)
     try {
       // 0) Get next startup id
+      console.log('Getting next startup ID...')
       const nextIdResult = await RegistryContract.getNextStartupId()
-      const nextId = Number(nextIdResult?.value ?? 0)
+      const nextId = Number((nextIdResult as any)?.value ?? nextIdResult ?? 0)
       if (!nextId) throw new Error('Could not fetch next startup id')
       setStartupId(nextId)
 
       // 1) Register startup
       console.log('Step 1: Registering startup...')
-      const registerResult = await RegistryContract.registerStartup({
+      const registerResult = (await RegistryContract.registerStartup({
         name: formData.name.trim(),
         description: formData.description.trim(),
         githubRepo: formData.githubRepo.trim(),
         website: formData.website?.trim() || undefined,
         twitter: formData.twitter?.trim() || undefined,
-      }) as any
-      
-      const txRegister = registerResult.txId
+      })) as any
+
+      const txRegister = registerResult?.txId || registerResult?.txid
+      if (!txRegister) throw new Error('Register tx did not return txid')
       setTxids((t) => ({ ...t, register: txRegister }))
       console.log('Startup registration tx:', txRegister)
 
-      // Wait for registration to complete
       await waitForTransaction(txRegister)
 
       // 2) Tokenize startup
       console.log('Step 2: Tokenizing startup...')
-      const tokenizeResult = await TokenContract.tokenizeStartup({
+      const tokenizeResult = (await TokenContract.tokenizeStartup({
         startupId: nextId,
         tokenName: formData.tokenName.trim(),
         tokenSymbol: formData.tokenSymbol.trim(),
         initialSupply: parseInt(formData.initialSupply),
         decimals: parseInt(formData.decimals),
-      }) as any
-      
-      const txTokenize = tokenizeResult.txId
+      })) as any
+      const txTokenize = tokenizeResult?.txId || tokenizeResult?.txid
+      if (!txTokenize) throw new Error('Tokenize tx did not return txid')
       setTxids((t) => ({ ...t, tokenize: txTokenize }))
       console.log('Tokenization tx:', txTokenize)
 
-      // Wait for tokenization to complete
       await waitForTransaction(txTokenize)
 
       // 3) Initialize metrics
       console.log('Step 3: Initializing metrics...')
-      const metricsResult = await ScoringContract.initializeMetrics(nextId) as any
-      const txMetrics = metricsResult.txId
+      const metricsResult = (await ScoringContract.initializeMetrics(nextId)) as any
+      const txMetrics = metricsResult?.txId || metricsResult?.txid
+      if (!txMetrics) throw new Error('Metrics tx did not return txid')
       setTxids((t) => ({ ...t, metrics: txMetrics }))
       console.log('Metrics initialization tx:', txMetrics)
 
-      // Wait for metrics to complete
       await waitForTransaction(txMetrics)
 
-      // 4) Set token address
+      // 4) Set token address (sende bu helper kontrattan token adresini hesaplayıp çağırıyor varsayıyorum)
       console.log('Step 4: Setting token address...')
-      const setTokenResult = await RegistryContract.setTokenAddress(nextId, addr) as any
-      const txSetToken = setTokenResult.txId
+      const setTokenResult = (await RegistryContract.setTokenAddress(nextId)) as any
+      const txSetToken = setTokenResult?.txId || setTokenResult?.txid
+      if (!txSetToken) throw new Error('setTokenAddress tx did not return txid')
       setTxids((t) => ({ ...t, setToken: txSetToken }))
       console.log('Set token address tx:', txSetToken)
 
-      // Wait for set token to complete
       await waitForTransaction(txSetToken)
-
-      // 5) Sync to Firebase (optional)
-      try {
-        await upsertStartupProfileWithMetrics({
-          id: nextId.toString(),
-          ownerAddress: addr!,
-          name: formData.name.trim(),
-          description: formData.description.trim(),
-          github: formData.githubRepo.trim(),
-          website: formData.website?.trim() || undefined,
-          twitter: formData.twitter?.trim() || undefined,
-          tokenName: formData.tokenName.trim(),
-          tokenSymbol: formData.tokenSymbol.trim(),
-          totalSupply: parseInt(formData.initialSupply, 10),
-          tags: [],
-        })
-      } catch (firebaseError) {
-        console.error('Firebase sync error (non-critical):', firebaseError)
-      }
 
       setCurrentStep(4)
     } catch (error: any) {
@@ -219,7 +264,16 @@ export default function StartupRegister() {
     }
   }
 
-  /* -------- UI (wallet not connected) -------- */
+  /* ---------- İlk kontrol/spinner ---------- */
+  if (!mounted || isChecking) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-100 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-4 border-orange-500 border-t-transparent rounded-full" />
+      </div>
+    )
+  }
+
+  // Wallet not connected
   if (!connected) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-100 flex items-center justify-center">
@@ -239,7 +293,7 @@ export default function StartupRegister() {
               Connect Wallet
             </button>
             <button
-              onClick={() => window.history.back()}
+              onClick={() => (window.location.href = '/')}
               className="px-6 py-3 rounded-full font-semibold bg-white border-2 border-orange-300 hover:border-orange-400 text-orange-700 transition-all"
             >
               Go Back
@@ -250,7 +304,7 @@ export default function StartupRegister() {
     )
   }
 
-  /* -------- UI (form) -------- */
+  /* ---------- UI (form) ---------- */
   return (
     <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-100 py-12">
       {/* Header */}

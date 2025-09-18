@@ -1,4 +1,3 @@
-
 (define-constant CONTRACT_OWNER tx-sender)
 (define-constant ERR_NOT_AUTHORIZED (err u400))
 (define-constant ERR_NOT_FOUND (err u401))
@@ -70,14 +69,14 @@
     (max-participants uint)
     (entry-fee uint)
   )
-  (let 
-    (
+  (let (
+      (current-height block-height)
       (competition-id (var-get next-competition-id))
-      (start-block (+ stacks-block-height u144)) 
+      (start-block (+ current-height u144))        
       (end-block (+ start-block duration-blocks))
     )
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
-    
+
     (map-set competitions
       { competition-id: competition-id }
       {
@@ -90,154 +89,162 @@
         min-participants: min-participants,
         max-participants: max-participants,
         entry-fee: entry-fee,
-        created-at: stacks-block-height
+        created-at: block-height
       }
     )
-    
+
     (map-set startup-competition-count
       { competition-id: competition-id }
       { count: u0 }
     )
-    
+
     (var-set next-competition-id (+ competition-id u1))
     (ok competition-id)
   )
 )
 
 (define-public (join-competition (competition-id uint) (startup-id uint))
-  (let 
-    (
+  (let (
       (competition (unwrap! (map-get? competitions { competition-id: competition-id }) ERR_NOT_FOUND))
       (participant-count (get count (unwrap! (map-get? startup-competition-count { competition-id: competition-id }) ERR_NOT_FOUND)))
       (caller tx-sender)
     )
-    (asserts! (< stacks-block-height (get start-block competition)) ERR_COMPETITION_ACTIVE)
-    
+    (asserts! (< block-height (get start-block competition)) ERR_COMPETITION_ACTIVE)
+
     (asserts! (< participant-count (get max-participants competition)) ERR_COMPETITION_ACTIVE)
-    
+
     (asserts! (is-none (map-get? competition-participants { competition-id: competition-id, startup-id: startup-id })) ERR_ALREADY_JOINED)
-    
+
     (if (> (get entry-fee competition) u0)
       (try! (stx-transfer? (get entry-fee competition) caller CONTRACT_OWNER))
       true
     )
-    
+
     (map-set competition-participants
       { competition-id: competition-id, startup-id: startup-id }
       {
-        joined-at: stacks-block-height,
+        joined-at: block-height,
         initial-score: u0,
         final-score: u0,
         rank: u0,
         reward-claimed: false
       }
     )
-    
+
     (map-set competition-startups
       { competition-id: competition-id, index: participant-count }
       { startup-id: startup-id }
     )
-    
+
     (map-set startup-competition-count
       { competition-id: competition-id }
       { count: (+ participant-count u1) }
     )
-    
+
     (ok true)
   )
 )
 
 (define-public (start-competition (competition-id uint))
-  (let 
-    (
+  (let (
       (competition (unwrap! (map-get? competitions { competition-id: competition-id }) ERR_NOT_FOUND))
       (participant-count (get count (unwrap! (map-get? startup-competition-count { competition-id: competition-id }) ERR_NOT_FOUND)))
     )
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
-    (asserts! (>= stacks-block-height (get start-block competition)) ERR_NOT_AUTHORIZED)
+    (asserts! (>= block-height (get start-block competition)) ERR_NOT_AUTHORIZED)
     (asserts! (>= participant-count (get min-participants competition)) ERR_NOT_AUTHORIZED)
-    
+
     (map-set competitions
       { competition-id: competition-id }
       (merge competition { status: STATUS_ACTIVE })
     )
-    
+
     (ok true)
   )
 )
 
-
 (define-public (end-competition (competition-id uint))
-  (let 
-    (
-      (competition (unwrap! (map-get? competitions { competition-id: competition-id }) ERR_NOT_FOUND))
-    )
+  (let ((competition (unwrap! (map-get? competitions { competition-id: competition-id }) ERR_NOT_FOUND)))
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
-    (asserts! (>= stacks-block-height (get end-block competition)) ERR_NOT_AUTHORIZED)
+    (asserts! (>= block-height (get end-block competition)) ERR_NOT_AUTHORIZED)
     (asserts! (is-eq (get status competition) STATUS_ACTIVE) ERR_COMPETITION_ENDED)
-    
+
     (map-set competitions
       { competition-id: competition-id }
       (merge competition { status: STATUS_ENDED })
     )
-    
+
     (map-set competition-results
       { competition-id: competition-id }
       {
-        winner-startup-id: u1, 
+        winner-startup-id: u1,   
         total-participants: (get count (unwrap! (map-get? startup-competition-count { competition-id: competition-id }) ERR_NOT_FOUND)),
         rewards-distributed: false,
-        ended-at: stacks-block-height
+        ended-at: block-height
       }
     )
-    
+
     (ok true)
   )
 )
 
 (define-public (claim-reward (competition-id uint) (startup-id uint))
-  (let 
-    (
+  (let (
       (competition (unwrap! (map-get? competitions { competition-id: competition-id }) ERR_NOT_FOUND))
       (participant (unwrap! (map-get? competition-participants { competition-id: competition-id, startup-id: startup-id }) ERR_NOT_FOUND))
       (results (unwrap! (map-get? competition-results { competition-id: competition-id }) ERR_NOT_FOUND))
     )
     (asserts! (is-eq (get status competition) STATUS_ENDED) ERR_COMPETITION_ACTIVE)
-    
     (asserts! (not (get reward-claimed participant)) ERR_NOT_AUTHORIZED)
-    
-    (let 
-      (
+
+    (let (
         (rank (get rank participant))
         (prize-amount (calculate-prize-amount competition rank))
       )
       (if (> prize-amount u0)
-        (try! (as-contract (stx-transfer? prize-amount tx-sender (get owner (unwrap! (contract-call? .startup-registry get-startup startup-id) ERR_NOT_FOUND)))))
+        (try!
+          (as-contract
+            (stx-transfer?
+              prize-amount
+              tx-sender
+              (get owner (unwrap! (contract-call? .startup-registry get-startup startup-id) ERR_NOT_FOUND))
+            )
+          )
+        )
         true
       )
-      
+
       (map-set competition-participants
         { competition-id: competition-id, startup-id: startup-id }
         (merge participant { reward-claimed: true })
       )
-      
+
       (ok prize-amount)
     )
   )
 )
 
-(define-private (calculate-prize-amount (competition (tuple (name (string-ascii 50)) (description (string-ascii 200)) (start-block uint) (end-block uint) (status uint) (total-prize-pool uint) (min-participants uint) (max-participants uint) (entry-fee uint) (created-at uint))) (rank uint))
-  (let 
-    (
-      (total-prize (get total-prize-pool competition))
-    )
+(define-private (calculate-prize-amount
+  (competition (tuple
+    (name (string-ascii 50))
+    (description (string-ascii 200))
+    (start-block uint)
+    (end-block uint)
+    (status uint)
+    (total-prize-pool uint)
+    (min-participants uint)
+    (max-participants uint)
+    (entry-fee uint)
+    (created-at uint)))
+  (rank uint))
+  (let ((total-prize (get total-prize-pool competition)))
     (if (is-eq rank u1)
-      (/ (* total-prize u50) u100) ;; 1. %50
+      (/ (* total-prize u50) u100)
       (if (is-eq rank u2)
-        (/ (* total-prize u30) u100) ;; 2. %30
+        (/ (* total-prize u30) u100)
         (if (is-eq rank u3)
-          (/ (* total-prize u20) u100) ;; 3. %20
-          u0 
+          (/ (* total-prize u20) u100)
+          u0
         )
       )
     )
