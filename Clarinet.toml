@@ -1,0 +1,39 @@
+[project]
+name = "startex-contracts"
+authors = ["startex-team"]
+description = "StartEx - Tokenized Startup Platform on Stacks"
+telemetry = false
+cache_dir = ".clarinet"
+
+[contracts.startup-registry]
+path = "startex-contracts/contracts/startup-registry.clar"
+clarity_version = 2
+epoch = 2.4
+
+[contracts.token-factory]
+path = "startex-contracts/contracts/token-factory.clar"
+clarity_version = 2
+epoch = 2.4
+
+[contracts.scoring-system]
+path = "startex-contracts/contracts/scoring-system.clar" 
+clarity_version = 2
+epoch = 2.4
+
+[contracts.competition]
+path = "startex-contracts/contracts/competition.clar"
+clarity_version = 2
+epoch = 2.4
+
+[repl]
+costs_version = 3
+parser_version = 2
+
+[repl.analysis]
+passes = ["check_checker"]
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
