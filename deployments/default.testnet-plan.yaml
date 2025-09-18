@@ -10,29 +10,29 @@ plan:
       transactions:
         - contract-publish:
             contract-name: startup-registry
-            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
-            cost: 775984
+            expected-sender: ST3PDTAQJ556CKDB1PGKQ3Y8TEP6FMY0R4QDG8WT
+            cost: 1491667
             path: startex-contracts/contracts/startup-registry.clar
             anchor-block-only: true
             clarity-version: 2
         - contract-publish:
             contract-name: competition
-            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
-            cost: 778780
+            expected-sender: ST3PDTAQJ556CKDB1PGKQ3Y8TEP6FMY0R4QDG8WT
+            cost: 1497042
             path: startex-contracts/contracts/competition.clar
             anchor-block-only: true
             clarity-version: 2
         - contract-publish:
             contract-name: scoring-system
-            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
-            cost: 778221
+            expected-sender: ST3PDTAQJ556CKDB1PGKQ3Y8TEP6FMY0R4QDG8WT
+            cost: 1495967
             path: startex-contracts/contracts/scoring-system.clar
             anchor-block-only: true
             clarity-version: 2
         - contract-publish:
             contract-name: token-factory
-            expected-sender: ST3N95DREJ6V6KN95JA83X4B6WM1FNHQCSPVTBCSZ
-            cost: 776683
+            expected-sender: ST3PDTAQJ556CKDB1PGKQ3Y8TEP6FMY0R4QDG8WT
+            cost: 1493011
             path: startex-contracts/contracts/token-factory.clar
             anchor-block-only: true
             clarity-version: 2
