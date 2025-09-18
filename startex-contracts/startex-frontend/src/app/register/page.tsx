@@ -6,11 +6,10 @@ import {
   request,
   getLocalStorage,
   disconnect as stacksDisconnect,
-  isConnected as walletIsConnected,
 } from '@stacks/connect'
 import {
   stringAsciiCV, uintCV, someCV, noneCV, contractPrincipalCV,
-  cvToHex, fetchCallReadOnlyFunction, hexToCV, cvToJSON,
+  cvToHex, hexToCV, cvToJSON, ClarityValue,
 } from '@stacks/transactions'
 
 import {
@@ -18,18 +17,9 @@ import {
   AlertCircle, Sparkles, Zap, Coins,
 } from 'lucide-react'
 
+import { upsertStartupProfileWithMetrics } from '@/lib/firebase/offchain-sync'
+
 /* ---------- ENV / CONTRACTS ---------- */
-const RPC_URL =
-  process.env.NEXT_PUBLIC_STACKS_RPC_URL || 'https://api.testnet.hiro.so'
-
-  
-// @stacks/network kullanmadan basit bir network objesi:
-// network shim: v7 için fetch + getCoreApiUrl sağlıyoruz
-const NETWORK = {
-  fetch: (input: any, init?: any) => fetch(input, init),
-  getCoreApiUrl: () => RPC_URL,
-} as any
-
 const CORE_API = process.env.NEXT_PUBLIC_STACKS_RPC_URL || 'https://api.testnet.hiro.so'
 
 const CONTRACTS = {
@@ -61,6 +51,21 @@ type FormData = {
 }
 type Errors = Partial<Record<keyof FormData, string>>
 
+type WalletAddressEntry = { symbol?: string; address?: string }
+
+type WalletStorage = {
+  addresses?: WalletAddressEntry[] | { stx?: WalletAddressEntry[] }
+}
+
+type AddressesResponse = {
+  addresses?: WalletAddressEntry[]
+}
+
+type ContractCallResponse = {
+  txid?: string
+  transactionHash?: string
+}
+
 export default function StartupRegister() {
   /* Wallet state */
   const [addr, setAddr] = useState<string | null>(null)
@@ -87,33 +92,34 @@ export default function StartupRegister() {
   /* -------- Wallet helpers -------- */
   const readAddrFromStorage = () => {
     try {
-      const data: any = getLocalStorage?.()
-      const a =
-        data?.addresses?.stx?.[0]?.address ??
-        data?.addresses?.find?.((x: any) => x.symbol === 'STX')?.address ??
-        null
-      if (a) {
-        setAddr(a)
+      const data = getLocalStorage?.() as WalletStorage | undefined
+      const addresses = data?.addresses
+      const addressObj = !Array.isArray(addresses) ? (addresses as { stx?: WalletAddressEntry[] }) : undefined
+      const fromStxArray = addressObj?.stx?.[0]?.address
+      const fromList = Array.isArray(addresses)
+        ? addresses.find((entry) => entry.symbol === 'STX')?.address
+        : undefined
+
+      const selected = fromStxArray ?? fromList
+      if (selected) {
+        setAddr(selected)
         setConnected(true)
       }
-    } catch {}
+    } catch {
+      // Ignore storage access issues
+    }
   }
 
   useEffect(() => {
-    try {
-      if (walletIsConnected?.()) readAddrFromStorage()
-      else readAddrFromStorage()
-    } catch {
-      readAddrFromStorage()
-    }
+    readAddrFromStorage()
   }, [])
 
   const connectWallet = async () => {
     await connect({ forceWalletSelect: true })
-    const res: any = await request('getAddresses').catch(() => null)
-    const a = res?.addresses?.find?.((x: any) => x.symbol === 'STX')?.address ?? null
-    setAddr(a)
-    setConnected(!!a)
+    const response = (await request('getAddresses').catch(() => null)) as AddressesResponse | null
+    const selected = response?.addresses?.find((entry) => entry.symbol === 'STX')?.address ?? null
+    setAddr(selected)
+    setConnected(Boolean(selected))
   }
 
   const disconnectWallet = () => {
@@ -156,13 +162,12 @@ export default function StartupRegister() {
     setErrors({})
   }
 
-async function ro<T = any>(
+async function ro<T = unknown>(
   contract: { address: string; name: string },
   fn: string,
-  args: any[] = [],          // ClarityValue[] (veya boş)
+  args: ClarityValue[] = [],
 ): Promise<T> {
-  // Argümanları 0x HEX’e çevir
-  const hexArgs = args.map(a => (typeof a === 'string' ? a : cvToHex(a)))
+  const hexArgs = args.map((value) => cvToHex(value))
 
   const res = await fetch(
     `${CORE_API}/v2/contracts/call-read/${contract.address}/${contract.name}/${fn}`,
@@ -170,7 +175,7 @@ async function ro<T = any>(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        sender: contract.address,     // veya addr ?? contract.address
+        sender: contract.address,
         arguments: hexArgs,
       }),
     }
@@ -178,8 +183,8 @@ async function ro<T = any>(
   if (!res.ok) throw new Error(`read-only http error: ${res.status}`)
   const json = await res.json()
   if (!json.okay) throw new Error(`read-only failed: ${json.cause || 'not okay'}`)
-  const cv = hexToCV(json.result)     // 0x... -> ClarityValue
-  return cvToJSON(cv) as any
+  const cv = hexToCV(json.result)
+  return cvToJSON(cv) as T
 }
 
   /* -------- Contract call helper -------- */
@@ -188,14 +193,15 @@ async function ro<T = any>(
     fn: string,
     argsCV: string[],
   ): Promise<string> {
-    const resp: any = await request('contract_call', {
+    const resp = (await request('contract_call', {
       contractAddress: contract.address,
       contractName: contract.name,
       functionName: fn,
       functionArgs: argsCV,
       network: (process.env.NEXT_PUBLIC_STACKS_NETWORK || 'testnet').toLowerCase(),
-    })
-    return resp?.txid || resp?.transactionHash || ''
+    })) as ContractCallResponse | null
+
+    return resp?.txid ?? resp?.transactionHash ?? ''
   }
 
   /* -------- Submit pipeline -------- */
@@ -247,10 +253,29 @@ async function ro<T = any>(
       const txSetToken = await call(CONTRACTS.registry, 'set-token-address', setTokenArgs)
       setTxids((t) => ({ ...t, setToken: txSetToken }))
 
+      try {
+        await upsertStartupProfileWithMetrics({
+          id: nextId.toString(),
+          ownerAddress: addr!,
+          name: formData.name.trim(),
+          description: formData.description.trim(),
+          github: formData.githubRepo.trim(),
+          website: formData.website?.trim() || undefined,
+          twitter: formData.twitter?.trim() || undefined,
+          tokenName: formData.tokenName.trim(),
+          tokenSymbol: formData.tokenSymbol.trim(),
+          totalSupply: parseInt(formData.initialSupply, 10),
+          tags: [],
+        })
+      } catch (firebaseError) {
+        console.error('Firebase sync error', firebaseError)
+      }
+
       setCurrentStep(4)
-    } catch (e: any) {
-      console.error('Submit error', e)
-      alert(e?.message || 'Error submitting startup. Please try again.')
+    } catch (error) {
+      console.error('Submit error', error)
+      const message = error instanceof Error ? error.message : 'Error submitting startup. Please try again.'
+      alert(message)
     } finally {
       setIsSubmitting(false)
     }
@@ -353,7 +378,7 @@ async function ro<T = any>(
                   <Rocket className="w-8 h-8 text-white" />
                 </div>
                 <h2 className="text-3xl font-bold text-gray-900">Tell us about your startup</h2>
-                <p className="text-gray-600">Let's start with the basics</p>
+                <p className="text-gray-600">Let&rsquo;s start with the basics</p>
               </div>
 
               <div className="space-y-6">
@@ -385,7 +410,7 @@ async function ro<T = any>(
                     className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all resize-none ${
                       errors.description ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
                     }`}
-                    placeholder="Describe your startup's mission and vision..."
+                    placeholder="Describe your startup&rsquo;s mission and vision..."
                   />
                   {errors.description && (
                     <p className="text-red-500 text-sm mt-1 flex items-center">
@@ -703,7 +728,7 @@ async function ro<T = any>(
               </div>
 
               <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl p-6 border border-green-200">
-                <h3 className="font-bold text-lg text-gray-900 mb-2">What's Next?</h3>
+                <h3 className="font-bold text-lg text-gray-900 mb-2">What&rsquo;s Next?</h3>
                 <div className="space-y-2 text-sm text-gray-700">
                   <p>✅ Your startup is now live on StartEx</p>
                   <p>✅ Your tokens are ready for trading</p>

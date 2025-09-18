@@ -133,6 +133,157 @@ export class GitHubAPI {
   }
 
   /**
+   * Fetch repository issues and PRs count
+   */
+  static async getIssuesAndPRs(owner: string, repo: string): Promise<{ issues: number; prs: number }> {
+    try {
+      const [issuesResponse, prsResponse] = await Promise.all([
+        fetch(`${this.BASE_URL}/repos/${owner}/${repo}/issues?state=all&per_page=1`, { headers: this.HEADERS }),
+        fetch(`${this.BASE_URL}/repos/${owner}/${repo}/pulls?state=all&per_page=1`, { headers: this.HEADERS })
+      ])
+
+      const getCountFromHeader = (response: Response): number => {
+        const linkHeader = response.headers.get('link')
+        if (linkHeader) {
+          const match = linkHeader.match(/page=(\d+)>; rel="last"/)
+          if (match) {
+            return parseInt(match[1])
+          }
+        }
+        return 0
+      }
+
+      return {
+        issues: getCountFromHeader(issuesResponse),
+        prs: getCountFromHeader(prsResponse)
+      }
+    } catch (error) {
+      console.error('Error fetching issues and PRs:', error)
+      return { issues: 0, prs: 0 }
+    }
+  }
+
+  /**
+   * Fetch commit activity for the past year
+   */
+  static async getCommitActivity(owner: string, repo: string): Promise<GitHubCommitActivity[]> {
+    try {
+      const response = await fetch(
+        `${this.BASE_URL}/repos/${owner}/${repo}/stats/commit_activity`,
+        { headers: this.HEADERS }
+      )
+
+      if (!response.ok) {
+        throw new Error(`GitHub API error: ${response.status}`)
+      }
+
+      const data = await response.json()
+      return data.map((week: any) => ({
+        week: week.week,
+        commits: week.total,
+        additions: 0, // This would require additional API calls
+        deletions: 0
+      }))
+    } catch (error) {
+      console.error('Error fetching commit activity:', error)
+      return []
+    }
+  }
+
+  /**
+   * Get comprehensive repository statistics
+   */
+  static async getRepositoryStats(githubUrl: string): Promise<GitHubRepoStats | null> {
+    try {
+      const parsed = this.parseGitHubURL(githubUrl)
+      if (!parsed) {
+        throw new Error('Invalid GitHub URL')
+      }
+
+      const { owner, repo } = parsed
+
+      // Fetch basic repository info
+      const repoInfo = await this.getRepositoryInfo(owner, repo)
+      
+      // Fetch additional metrics in parallel
+      const [commitCount, contributors, issuesAndPRs] = await Promise.all([
+        this.getCommitCount(owner, repo),
+        this.getContributors(owner, repo),
+        this.getIssuesAndPRs(owner, repo)
+      ])
+
+      return {
+        owner,
+        repo,
+        stars: repoInfo.stargazers_count || 0,
+        forks: repoInfo.forks_count || 0,
+        watchers: repoInfo.watchers_count || 0,
+        commits: commitCount,
+        contributors: contributors.length,
+        issues: issuesAndPRs.issues,
+        pullRequests: issuesAndPRs.prs,
+        lastCommitDate: repoInfo.pushed_at || repoInfo.updated_at,
+        createdAt: repoInfo.created_at,
+        updatedAt: repoInfo.updated_at,
+        language: repoInfo.language || 'Unknown',
+        topics: repoInfo.topics || [],
+        description: repoInfo.description || '',
+        license: repoInfo.license?.name || null
+      }
+    } catch (error) {
+      console.error('Error fetching repository stats:', error)
+      return null
+    }
+  }
+
+  /**
+   * Validate if GitHub repository exists and is accessible
+   */
+  static async validateRepository(githubUrl: string): Promise<boolean> {
+    try {
+      const parsed = this.parseGitHubURL(githubUrl)
+      if (!parsed) {
+        return false
+      }
+
+      const { owner, repo } = parsed
+      const response = await fetch(
+        `${this.BASE_URL}/repos/${owner}/${repo}`,
+        { 
+          headers: this.HEADERS,
+          method: 'HEAD' // Only check if exists, don't fetch data
+        }
+      )
+
+      return response.ok
+    } catch (error) {
+      console.error('Error validating repository:', error)
+      return false
+    }
+  }
+
+  /**
+   * Get repository languages
+   */
+  static async getRepositoryLanguages(owner: string, repo: string): Promise<Record<string, number>> {
+    try {
+      const response = await fetch(
+        `${this.BASE_URL}/repos/${owner}/${repo}/languages`,
+        { headers: this.HEADERS }
+      )
+
+      if (!response.ok) {
+        throw new Error(`GitHub API error: ${response.status}`)
+      }
+
+      return await response.json()
+    } catch (error) {
+      console.error('Error fetching repository languages:', error)
+      return {}
+    }
+  }
+
+  /**
    * Calculate repository health score
    */
   static calculateHealthScore(stats: GitHubRepoStats): number {
@@ -311,172 +462,3 @@ export class CachedGitHubAPI extends GitHubAPI {
     return isValid
   }
 }
-
-  /**
-   * Fetch repository issues and PRs count
-   */
-  static async getIssuesAndPRs(owner: string, repo: string): Promise<{ issues: number; prs: number }> {
-    try {
-      const [issuesResponse, prsResponse] = await Promise.all([
-        fetch(`${this.BASE_URL}/repos/${owner}/${repo}/issues?state=all&per_page=1`, { headers: this.HEADERS }),
-        fetch(`${this.BASE_URL}/repos/${owner}/${repo}/pulls?state=all&per_page=1`, { headers: this.HEADERS })
-      ])
-
-      const getCountFromHeader = (response: Response): number => {
-        const linkHeader = response.headers.get('link')
-        if (linkHeader) {
-          const match = linkHeader.match(/page=(\d+)>; rel="last"/)
-          if (match) {
-            return parseInt(match[1])
-          }
-        }
-        return 0
-      }
-
-      return {
-        issues: getCountFromHeader(issuesResponse),
-        prs: getCountFromHeader(prsResponse)
-      }
-    } catch (error) {
-      console.error('Error fetching issues and PRs:', error)
-      return { issues: 0, prs: 0 }
-    }
-  }
-
-  /**
-   * Fetch commit activity for the past year
-   */
-  static async getCommitActivity(owner: string, repo: string): Promise<GitHubCommitActivity[]> {
-    try {
-      const response = await fetch(
-        `${this.BASE_URL}/repos/${owner}/${repo}/stats/commit_activity`,
-        { headers: this.HEADERS }
-      )
-
-      if (!response.ok) {
-        throw new Error(`GitHub API error: ${response.status}`)
-      }
-
-      const data = await response.json()
-      return data.map((week: any) => ({
-        week: week.week,
-        commits: week.total,
-        additions: 0, // This would require additional API calls
-        deletions: 0
-      }))
-    } catch (error) {
-      console.error('Error fetching commit activity:', error)
-      return []
-    }
-  }
-
-  /**
-   * Get comprehensive repository statistics
-   */
-  static async getRepositoryStats(githubUrl: string): Promise<GitHubRepoStats | null> {
-    try {
-      const parsed = this.parseGitHubURL(githubUrl)
-      if (!parsed) {
-        throw new Error('Invalid GitHub URL')
-      }
-
-      const { owner, repo } = parsed
-
-      // Fetch basic repository info
-      const repoInfo = await this.getRepositoryInfo(owner, repo)
-      
-      // Fetch additional metrics in parallel
-      const [commitCount, contributors, issuesAndPRs] = await Promise.all([
-        this.getCommitCount(owner, repo),
-        this.getContributors(owner, repo),
-        this.getIssuesAndPRs(owner, repo)
-      ])
-
-      return {
-        owner,
-        repo,
-        stars: repoInfo.stargazers_count || 0,
-        forks: repoInfo.forks_count || 0,
-        watchers: repoInfo.watchers_count || 0,
-        commits: commitCount,
-        contributors: contributors.length,
-        issues: issuesAndPRs.issues,
-        pullRequests: issuesAndPRs.prs,
-        lastCommitDate: repoInfo.pushed_at || repoInfo.updated_at,
-        createdAt: repoInfo.created_at,
-        updatedAt: repoInfo.updated_at,
-        language: repoInfo.language || 'Unknown',
-        topics: repoInfo.topics || [],
-        description: repoInfo.description || '',
-        license: repoInfo.license?.name || null
-      }
-    } catch (error) {
-      console.error('Error fetching repository stats:', error)
-      return null
-    }
-  }
-
-  /**
-   * Validate if GitHub repository exists and is accessible
-   */
-  static async validateRepository(githubUrl: string): Promise<boolean> {
-    try {
-      const parsed = this.parseGitHubURL(githubUrl)
-      if (!parsed) {
-        return false
-      }
-
-      const { owner, repo } = parsed
-      const response = await fetch(
-        `${this.BASE_URL}/repos/${owner}/${repo}`,
-        { 
-          headers: this.HEADERS,
-          method: 'HEAD' // Only check if exists, don't fetch data
-        }
-      )
-
-      return response.ok
-    } catch (error) {
-      console.error('Error validating repository:', error)
-      return false
-    }
-  }
-
-  /**
-   * Get repository languages
-   */
-  static async getRepositoryLanguages(owner: string, repo: string): Promise<Record<string, number>> {
-    try {
-      const response = await fetch(
-        `${this.BASE_URL}/repos/${owner}/${repo}/languages`,
-        { headers: this.HEADERS }
-      )
-
-      if (!response.ok) {
-        throw new Error(`GitHub API error: ${response.status}`)
-      }
-
-      return await response.json()
-    } catch (error) {
-      console.error('Error fetching repository languages:', error)
-      return {}
-    }
-  }
-
-  /**
-   * Get recent commits
-   */
-  static async getRecentCommits(owner: string, repo: string, count: number = 10): Promise<any[]> {
-    try {
-      const response = await fetch(
-        `${this.BASE_URL}/repos/${owner}/${repo}/commits?per_page=${count}`,
-        { headers: this.HEADERS }
-      )
-
-      if (!response.ok) {
-        throw new Error(`GitHub API error: ${response.status}`)
-      }
-
-      return await response.json()
-    } catch (error) {
-      console.error('Error fetching recent commits:', error)
