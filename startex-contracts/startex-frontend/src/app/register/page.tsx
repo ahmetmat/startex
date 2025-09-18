@@ -2,40 +2,23 @@
 
 import { useEffect, useState } from 'react'
 import {
-  connect,
-  request,
-  getLocalStorage,
-  disconnect as stacksDisconnect,
-} from '@stacks/connect'
-import {
-  stringAsciiCV, uintCV, someCV, noneCV, contractPrincipalCV,
-  cvToHex, hexToCV, cvToJSON, ClarityValue,
-} from '@stacks/transactions'
-
-import {
   Rocket, Github, Twitter, Globe, ArrowRight, CheckCircle,
   AlertCircle, Sparkles, Zap, Coins,
 } from 'lucide-react'
 
+import {
+  connectWallet,
+  getUserAddress,
+  isSignedIn,
+  signOut,
+} from '@/lib/wallet/connection'
+import {
+  RegistryContract,
+  TokenContract,
+  ScoringContract,
+  waitForTransaction,
+} from '@/lib/contracts/calls'
 import { upsertStartupProfileWithMetrics } from '@/lib/firebase/offchain-sync'
-
-/* ---------- ENV / CONTRACTS ---------- */
-const CORE_API = process.env.NEXT_PUBLIC_STACKS_RPC_URL || 'https://api.testnet.hiro.so'
-
-const CONTRACTS = {
-  registry: {
-    address: process.env.NEXT_PUBLIC_REGISTRY_ADDR as string,
-    name: process.env.NEXT_PUBLIC_REGISTRY_NAME || 'startup-registry',
-  },
-  token: {
-    address: process.env.NEXT_PUBLIC_TOKEN_ADDR as string,
-    name: process.env.NEXT_PUBLIC_TOKEN_NAME || 'startup-token',
-  },
-  metrics: {
-    address: process.env.NEXT_PUBLIC_METRICS_ADDR as string,
-    name: process.env.NEXT_PUBLIC_METRICS_NAME || 'startup-metrics',
-  },
-}
 
 /* ---------- TYPES ---------- */
 type FormData = {
@@ -50,21 +33,6 @@ type FormData = {
   decimals: string
 }
 type Errors = Partial<Record<keyof FormData, string>>
-
-type WalletAddressEntry = { symbol?: string; address?: string }
-
-type WalletStorage = {
-  addresses?: WalletAddressEntry[] | { stx?: WalletAddressEntry[] }
-}
-
-type AddressesResponse = {
-  addresses?: WalletAddressEntry[]
-}
-
-type ContractCallResponse = {
-  txid?: string
-  transactionHash?: string
-}
 
 export default function StartupRegister() {
   /* Wallet state */
@@ -82,48 +50,38 @@ export default function StartupRegister() {
     tokenName: '',
     tokenSymbol: '',
     initialSupply: '1000000',
-    decimals: '6', // kontratta <= 8 şartı var
+    decimals: '6',
   })
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [errors, setErrors] = useState<Errors>({})
   const [startupId, setStartupId] = useState<number | null>(null)
   const [txids, setTxids] = useState<{ register?: string; tokenize?: string; metrics?: string; setToken?: string }>({})
 
-  /* -------- Wallet helpers -------- */
-  const readAddrFromStorage = () => {
-    try {
-      const data = getLocalStorage?.() as WalletStorage | undefined
-      const addresses = data?.addresses
-      const addressObj = !Array.isArray(addresses) ? (addresses as { stx?: WalletAddressEntry[] }) : undefined
-      const fromStxArray = addressObj?.stx?.[0]?.address
-      const fromList = Array.isArray(addresses)
-        ? addresses.find((entry) => entry.symbol === 'STX')?.address
-        : undefined
-
-      const selected = fromStxArray ?? fromList
-      if (selected) {
-        setAddr(selected)
+  /* -------- Wallet effect -------- */
+  useEffect(() => {
+    if (isSignedIn()) {
+      const address = getUserAddress()
+      if (address) {
+        setAddr(address)
         setConnected(true)
       }
-    } catch {
-      // Ignore storage access issues
+    }
+  }, [])
+
+  const handleConnectWallet = async () => {
+    try {
+      const address = await connectWallet()
+      if (address) {
+        setAddr(address)
+        setConnected(true)
+      }
+    } catch (error) {
+      console.error('Wallet connection failed:', error)
     }
   }
 
-  useEffect(() => {
-    readAddrFromStorage()
-  }, [])
-
-  const connectWallet = async () => {
-    await connect({ forceWalletSelect: true })
-    const response = (await request('getAddresses').catch(() => null)) as AddressesResponse | null
-    const selected = response?.addresses?.find((entry) => entry.symbol === 'STX')?.address ?? null
-    setAddr(selected)
-    setConnected(Boolean(selected))
-  }
-
-  const disconnectWallet = () => {
-    stacksDisconnect()
+  const handleDisconnectWallet = () => {
+    signOut()
     setAddr(null)
     setConnected(false)
   }
@@ -162,48 +120,6 @@ export default function StartupRegister() {
     setErrors({})
   }
 
-async function ro<T = unknown>(
-  contract: { address: string; name: string },
-  fn: string,
-  args: ClarityValue[] = [],
-): Promise<T> {
-  const hexArgs = args.map((value) => cvToHex(value))
-
-  const res = await fetch(
-    `${CORE_API}/v2/contracts/call-read/${contract.address}/${contract.name}/${fn}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sender: contract.address,
-        arguments: hexArgs,
-      }),
-    }
-  )
-  if (!res.ok) throw new Error(`read-only http error: ${res.status}`)
-  const json = await res.json()
-  if (!json.okay) throw new Error(`read-only failed: ${json.cause || 'not okay'}`)
-  const cv = hexToCV(json.result)
-  return cvToJSON(cv) as T
-}
-
-  /* -------- Contract call helper -------- */
-  async function call(
-    contract: { address: string; name: string },
-    fn: string,
-    argsCV: string[],
-  ): Promise<string> {
-    const resp = (await request('contract_call', {
-      contractAddress: contract.address,
-      contractName: contract.name,
-      functionName: fn,
-      functionArgs: argsCV,
-      network: (process.env.NEXT_PUBLIC_STACKS_NETWORK || 'testnet').toLowerCase(),
-    })) as ContractCallResponse | null
-
-    return resp?.txid ?? resp?.transactionHash ?? ''
-  }
-
   /* -------- Submit pipeline -------- */
   const handleSubmit = async () => {
     if (!validateStep(currentStep)) return
@@ -214,45 +130,67 @@ async function ro<T = unknown>(
 
     setIsSubmitting(true)
     try {
-      // 0) next-startup-id oku
-      const nextIdJSON = await ro(CONTRACTS.registry, 'get-next-startup-id', [])
-      const nextId = Number(nextIdJSON?.value ?? 0)
+      // 0) Get next startup id
+      const nextIdResult = await RegistryContract.getNextStartupId()
+      const nextId = Number(nextIdResult?.value ?? 0)
       if (!nextId) throw new Error('Could not fetch next startup id')
       setStartupId(nextId)
 
-      // 1) register-startup
-      const registerArgs = [
-        cvToHex(stringAsciiCV(formData.name.trim().slice(0, 50))),
-        cvToHex(stringAsciiCV(formData.description.trim().slice(0, 200))),
-        cvToHex(stringAsciiCV(formData.githubRepo.trim().slice(0, 100))),
-        cvToHex(formData.website ? someCV(stringAsciiCV(formData.website.trim().slice(0, 100))) : noneCV()),
-        cvToHex(formData.twitter ? someCV(stringAsciiCV(formData.twitter.trim().slice(0, 50))) : noneCV()),
-      ]
-      const txRegister = await call(CONTRACTS.registry, 'register-startup', registerArgs)
+      // 1) Register startup
+      console.log('Step 1: Registering startup...')
+      const registerResult = await RegistryContract.registerStartup({
+        name: formData.name.trim(),
+        description: formData.description.trim(),
+        githubRepo: formData.githubRepo.trim(),
+        website: formData.website?.trim() || undefined,
+        twitter: formData.twitter?.trim() || undefined,
+      }) as any
+      
+      const txRegister = registerResult.txId
       setTxids((t) => ({ ...t, register: txRegister }))
+      console.log('Startup registration tx:', txRegister)
 
-      // 2) tokenize-startup (kontrat içi 1 STX fee)
-      const tokenizeArgs = [
-        cvToHex(uintCV(nextId)),
-        cvToHex(stringAsciiCV(formData.tokenName.trim().slice(0, 32))),
-        cvToHex(stringAsciiCV(formData.tokenSymbol.trim().slice(0, 10))),
-        cvToHex(uintCV(parseInt(formData.initialSupply))),
-        cvToHex(uintCV(parseInt(formData.decimals))), // ≤ 8
-      ]
-      const txTokenize = await call(CONTRACTS.token, 'tokenize-startup', tokenizeArgs)
+      // Wait for registration to complete
+      await waitForTransaction(txRegister)
+
+      // 2) Tokenize startup
+      console.log('Step 2: Tokenizing startup...')
+      const tokenizeResult = await TokenContract.tokenizeStartup({
+        startupId: nextId,
+        tokenName: formData.tokenName.trim(),
+        tokenSymbol: formData.tokenSymbol.trim(),
+        initialSupply: parseInt(formData.initialSupply),
+        decimals: parseInt(formData.decimals),
+      }) as any
+      
+      const txTokenize = tokenizeResult.txId
       setTxids((t) => ({ ...t, tokenize: txTokenize }))
+      console.log('Tokenization tx:', txTokenize)
 
-      // 3) initialize-metrics
-      const metricsArgs = [cvToHex(uintCV(nextId))]
-      const txMetrics = await call(CONTRACTS.metrics, 'initialize-metrics', metricsArgs)
+      // Wait for tokenization to complete
+      await waitForTransaction(txTokenize)
+
+      // 3) Initialize metrics
+      console.log('Step 3: Initializing metrics...')
+      const metricsResult = await ScoringContract.initializeMetrics(nextId) as any
+      const txMetrics = metricsResult.txId
       setTxids((t) => ({ ...t, metrics: txMetrics }))
+      console.log('Metrics initialization tx:', txMetrics)
 
-      // 4) set-token-address
-      const tokenCV = contractPrincipalCV(CONTRACTS.token.address, CONTRACTS.token.name)
-      const setTokenArgs = [cvToHex(uintCV(nextId)), cvToHex(tokenCV)]
-      const txSetToken = await call(CONTRACTS.registry, 'set-token-address', setTokenArgs)
+      // Wait for metrics to complete
+      await waitForTransaction(txMetrics)
+
+      // 4) Set token address
+      console.log('Step 4: Setting token address...')
+      const setTokenResult = await RegistryContract.setTokenAddress(nextId, addr) as any
+      const txSetToken = setTokenResult.txId
       setTxids((t) => ({ ...t, setToken: txSetToken }))
+      console.log('Set token address tx:', txSetToken)
 
+      // Wait for set token to complete
+      await waitForTransaction(txSetToken)
+
+      // 5) Sync to Firebase (optional)
       try {
         await upsertStartupProfileWithMetrics({
           id: nextId.toString(),
@@ -268,13 +206,13 @@ async function ro<T = unknown>(
           tags: [],
         })
       } catch (firebaseError) {
-        console.error('Firebase sync error', firebaseError)
+        console.error('Firebase sync error (non-critical):', firebaseError)
       }
 
       setCurrentStep(4)
-    } catch (error) {
-      console.error('Submit error', error)
-      const message = error instanceof Error ? error.message : 'Error submitting startup. Please try again.'
+    } catch (error: any) {
+      console.error('Submit error:', error)
+      const message = error?.message || 'Error submitting startup. Please try again.'
       alert(message)
     } finally {
       setIsSubmitting(false)
@@ -291,11 +229,11 @@ async function ro<T = unknown>(
           </div>
           <div className="space-y-2">
             <h1 className="text-3xl font-bold text-gray-900">Connect Your Wallet</h1>
-            <p className="text-gray-600">Please connect your wallet to register your startup.</p>
+            <p className="text-gray-600">Please connect your Stacks wallet to register your startup.</p>
           </div>
           <div className="flex items-center justify-center gap-3">
             <button
-              onClick={connectWallet}
+              onClick={handleConnectWallet}
               className="bg-gradient-to-r from-orange-500 to-red-500 text-white px-6 py-3 rounded-full font-semibold hover:from-orange-600 hover:to-red-600 transition-all"
             >
               Connect Wallet
@@ -330,7 +268,7 @@ async function ro<T = unknown>(
           <div className="mt-2 text-sm text-gray-500">
             Connected:&nbsp;
             <span className="font-mono">{addr?.slice(0, 8)}…{addr?.slice(-4)}</span>
-            <button onClick={disconnectWallet} className="ml-3 text-orange-600 hover:underline">Disconnect</button>
+            <button onClick={handleDisconnectWallet} className="ml-3 text-orange-600 hover:underline">Disconnect</button>
           </div>
         </div>
       </div>
@@ -410,7 +348,7 @@ async function ro<T = unknown>(
                     className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all resize-none ${
                       errors.description ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
                     }`}
-                    placeholder="Describe your startup&rsquo;s mission and vision..."
+                    placeholder="Describe your startup's mission and vision..."
                   />
                   {errors.description && (
                     <p className="text-red-500 text-sm mt-1 flex items-center">
@@ -491,7 +429,7 @@ async function ro<T = unknown>(
                   <Coins className="w-8 h-8 text-white" />
                 </div>
                 <h2 className="text-3xl font-bold text-gray-900">Tokenize Your Startup</h2>
-                <p className="text-gray-600">Create tokens for your community & perks</p>
+                <p className="text-gray-600">Create tokens for your community</p>
               </div>
 
               <div className="space-y-6">
@@ -566,7 +504,6 @@ async function ro<T = unknown>(
                         errors.decimals ? 'border-red-300' : 'border-gray-200'
                       } focus:border-orange-500 focus:outline-none transition-all`}
                     >
-                      {/* en pratik seçenekler */}
                       <option value="6">6</option>
                       <option value="8">8</option>
                       <option value="0">0</option>
@@ -587,7 +524,7 @@ async function ro<T = unknown>(
                     <Zap className="w-5 h-5 text-blue-500 mt-0.5" />
                     <div className="text-sm text-blue-700">
                       <p className="font-semibold mb-1">Tokenization Fee: 1 STX</p>
-                      <p>This fee is transferred inside the contract during tokenization.</p>
+                      <p>This fee is required for the tokenization process on Stacks testnet.</p>
                     </div>
                   </div>
                 </div>
@@ -679,11 +616,11 @@ async function ro<T = unknown>(
 
                 {Object.values(txids).some(Boolean) && (
                   <div className="bg-white border border-gray-200 rounded-xl p-4 text-sm text-gray-700">
-                    <div className="font-semibold mb-2">Transaction IDs</div>
-                    {txids.register && <div>register-startup: <span className="font-mono">{txids.register}</span></div>}
-                    {txids.tokenize && <div>tokenize-startup: <span className="font-mono">{txids.tokenize}</span></div>}
-                    {txids.metrics && <div>initialize-metrics: <span className="font-mono">{txids.metrics}</span></div>}
-                    {txids.setToken && <div>set-token-address: <span className="font-mono">{txids.setToken}</span></div>}
+                    <div className="font-semibold mb-2">Transaction Status:</div>
+                    {txids.register && <div>✅ Startup registered: <span className="font-mono text-xs">{txids.register}</span></div>}
+                    {txids.tokenize && <div>✅ Token created: <span className="font-mono text-xs">{txids.tokenize}</span></div>}
+                    {txids.metrics && <div>✅ Metrics initialized: <span className="font-mono text-xs">{txids.metrics}</span></div>}
+                    {txids.setToken && <div>✅ Token linked: <span className="font-mono text-xs">{txids.setToken}</span></div>}
                   </div>
                 )}
               </div>
@@ -691,7 +628,8 @@ async function ro<T = unknown>(
               <div className="flex space-x-4">
                 <button
                   onClick={prevStep}
-                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 py-4 rounded-xl font-bold text-lg transition-all"
+                  disabled={isSubmitting}
+                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 py-4 rounded-xl font-bold text-lg transition-all disabled:opacity-50"
                 >
                   Back
                 </button>
@@ -722,7 +660,7 @@ async function ro<T = unknown>(
                 </div>
                 <h2 className="text-4xl font-bold text-gray-900">🎉 Congratulations!</h2>
                 <p className="text-xl text-gray-600">
-                  Your startup has been successfully registered and tokenized!
+                  Your startup has been successfully registered and tokenized on Stacks testnet!
                   {startupId !== null && <span className="block mt-1">Startup ID: <span className="font-mono">{startupId}</span></span>}
                 </p>
               </div>
@@ -730,7 +668,7 @@ async function ro<T = unknown>(
               <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl p-6 border border-green-200">
                 <h3 className="font-bold text-lg text-gray-900 mb-2">What&rsquo;s Next?</h3>
                 <div className="space-y-2 text-sm text-gray-700">
-                  <p>✅ Your startup is now live on StartEx</p>
+                  <p>✅ Your startup is now live on Stacks testnet</p>
                   <p>✅ Your tokens are ready for trading</p>
                   <p>✅ You can start participating in competitions</p>
                   <p>✅ Begin building your community</p>
