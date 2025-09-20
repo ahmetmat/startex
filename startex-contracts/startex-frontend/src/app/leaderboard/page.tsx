@@ -18,16 +18,38 @@ import {
   Target,
   ChevronUp,
   ChevronDown,
-  ExternalLink
+  ExternalLink,
+  Coins
 } from 'lucide-react'
 
 import { HeaderWalletControls } from '@/components/HeaderWalletControls'
 import { MainHeader } from '@/components/MainHeader'
+import { DonationModal } from '@/components/DonationModal'
+import { getLocalStorage, isConnected as stacksIsConnected } from '@stacks/connect'
+import { openSTXTransfer } from '@stacks/connect'
+import { STACKS_TESTNET } from '@stacks/network'
 
-import type { LeaderboardEntry } from '@/lib/firebase/types'
-import { convertTimestamps, getLeaderboard } from '@/lib/firebase/firestore'
+import type { LeaderboardEntry, StartupProfile } from '@/lib/firebase/types'
+import { convertTimestamps, getLeaderboard, listStartupProfiles } from '@/lib/firebase/firestore'
 
 type LeaderboardPeriod = 'overall' | 'monthly' | 'weekly'
+
+type StartupWithMetrics = {
+  profile: StartupProfile
+  metrics: LeaderboardEntry
+}
+
+type DirectDonationRecord = {
+  id: string
+  startupId: string
+  startupName: string
+  amount: number
+  timestamp: string
+  recipient: string
+  txId: string
+}
+
+const MIN_DONATION_STX = 10
 
 const FALLBACK_LEADERBOARD: LeaderboardEntry[] = [
   {
@@ -242,14 +264,23 @@ const FALLBACK_LEADERBOARD: LeaderboardEntry[] = [
   }
 ]
 
-const CATEGORY_OPTIONS = [
-  'AI/ML',
-  'Sustainability',
-  'HealthTech',
-  'Education',
-  'Developer Tools',
-  'Supply Chain'
-]
+const FALLBACK_STARTUPS: StartupProfile[] = FALLBACK_LEADERBOARD.map((entry, index) => ({
+  id: entry.startupId ?? entry.id ?? `fallback-startup-${index + 1}`,
+  ownerAddress: entry.founder ?? `founder-${index + 1}`,
+  name: entry.name,
+  description: entry.description ?? 'High-performing startup on StartEx.',
+  website: entry.website,
+  twitter: entry.twitter,
+  github: entry.github,
+  tokenSymbol: entry.tokenSymbol,
+  tokenName: entry.tokenSymbol ?? entry.name,
+  score: entry.score,
+  rank: entry.rank,
+  verified: entry.verified ?? false,
+  tags: entry.category ? [entry.category] : undefined,
+  createdAt: new Date(Date.now() - (index + 1) * 24 * 60 * 60 * 1000).toISOString(),
+  updatedAt: new Date(Date.now() - index * 24 * 60 * 60 * 1000).toISOString()
+}))
 
 const PERIOD_OPTIONS: { label: string; value: LeaderboardPeriod }[] = [
   { label: 'Overall', value: 'overall' },
@@ -259,14 +290,81 @@ const PERIOD_OPTIONS: { label: string; value: LeaderboardPeriod }[] = [
 
 const NEW_ENTRY_WINDOW_MS = 48 * 60 * 60 * 1000
 
+// --- STX transfer helpers (Leather) ---
+const NETWORK = STACKS_TESTNET; // testnet by default; can be swapped to mainnet when ready
+const toMicroStx = (stx: number) => String(Math.round(stx * 1_000_000));
+
+async function sendStxDonation(recipient: string, amountStx: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    openSTXTransfer({
+      recipient,
+      amount: toMicroStx(amountStx),
+      memo: 'StartEx direct donation',
+      network: NETWORK,
+      onFinish: (data: { txId?: string; txRaw?: string }) => {
+        if (data?.txId) return resolve(data.txId);
+        // Fallback when wallet returns only txRaw (older wallets)
+        if (data?.txRaw) return resolve(data.txRaw);
+        return resolve('');
+      },
+      onCancel: () => reject(new Error('Donation cancelled in wallet')),
+    });
+  });
+}
+
 export default function Leaderboard() {
   const [selectedPeriod, setSelectedPeriod] = useState<LeaderboardPeriod>('overall')
   const [selectedCategory, setSelectedCategory] = useState<string>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState('score')
   const [leaderboardData, setLeaderboardData] = useState<LeaderboardEntry[]>([])
+  const [startupProfiles, setStartupProfiles] = useState<StartupProfile[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [isLoadingStartups, setIsLoadingStartups] = useState(false)
+  const [startupsError, setStartupsError] = useState<string | null>(null)
+  const [directDonationLog, setDirectDonationLog] = useState<DirectDonationRecord[]>([])
+  const [activeDonation, setActiveDonation] = useState<{ metrics: LeaderboardEntry; profile?: StartupProfile } | null>(null)
+  const [walletAddress, setWalletAddress] = useState<string | null>(null)
+
+  useEffect(() => {
+    const readWalletAddress = () => {
+      try {
+        const storage = getLocalStorage?.()
+        if (!storage) return null
+        const raw = (storage as any)?.addresses
+        if (Array.isArray(raw)) {
+          const entry = raw.find((item) => item?.symbol === 'STX')
+          return typeof entry?.address === 'string' ? entry.address : null
+        }
+        const structured = (raw as any)?.stx
+        if (Array.isArray(structured)) {
+          const entry = structured[0]
+          return typeof entry?.address === 'string' ? entry.address : null
+        }
+      } catch {
+        return null
+      }
+      return null
+    }
+
+    if (stacksIsConnected?.()) {
+      setWalletAddress(readWalletAddress())
+    } else {
+      setWalletAddress(readWalletAddress())
+    }
+
+    const handleStorage = () => {
+      setWalletAddress(readWalletAddress())
+    }
+
+    window.addEventListener('storage', handleStorage)
+    return () => {
+      window.removeEventListener('storage', handleStorage)
+    }
+  }, [])
+
+  const isConnected = typeof walletAddress === 'string' && walletAddress.length > 0
 
   useEffect(() => {
     let isMounted = true
@@ -297,18 +395,149 @@ export default function Leaderboard() {
     }
   }, [selectedPeriod])
 
-  const dataToRender = useMemo(() => (
+  useEffect(() => {
+    let isMounted = true
+
+    const loadStartups = async () => {
+      setIsLoadingStartups(true)
+      setStartupsError(null)
+      try {
+        const profiles = await listStartupProfiles(100)
+        if (!isMounted) return
+        const normalizedProfiles = profiles.map((profile) => convertTimestamps<StartupProfile>(profile))
+        setStartupProfiles(normalizedProfiles)
+      } catch (err) {
+        console.error('Failed to load startup profiles from Firebase', err)
+        if (isMounted) {
+          setStartupProfiles([])
+          setStartupsError(err instanceof Error ? err.message : 'Unable to load startups')
+        }
+      } finally {
+        if (isMounted) setIsLoadingStartups(false)
+      }
+    }
+
+    loadStartups()
+
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  const leaderboardEntries = useMemo(() => (
     leaderboardData.length ? leaderboardData : FALLBACK_LEADERBOARD
   ), [leaderboardData])
 
-  const filteredData = useMemo(() => {
-    const loweredSearch = searchQuery.toLowerCase()
+  const startupsWithMetrics = useMemo<StartupWithMetrics[]>(() => {
+    const profiles = startupProfiles.length ? startupProfiles : FALLBACK_STARTUPS
+    const leaderboardMap = new Map<string, LeaderboardEntry>()
 
-    const base = dataToRender.filter((startup) => {
+    leaderboardEntries.forEach((entry) => {
+      const key = entry.startupId ?? entry.id
+      if (key) {
+        leaderboardMap.set(key, entry)
+      }
+    })
+
+    return profiles.map((profile, index) => {
+      const key = profile.id
+      const leaderboardEntry = key ? leaderboardMap.get(key) : undefined
+      const fallbackTokenSymbol = profile.tokenSymbol ?? profile.tokenName ?? (profile.name ? profile.name.slice(0, 4).toUpperCase() : 'ST')
+
+      const mergedMetrics: LeaderboardEntry = {
+        id: leaderboardEntry?.id ?? `startup-${key ?? index}`,
+        startupId: key ?? leaderboardEntry?.startupId ?? `startup-${index}`,
+        name: leaderboardEntry?.name ?? profile.name ?? 'Unnamed Startup',
+        founder: leaderboardEntry?.founder ?? profile.ownerAddress,
+        description: leaderboardEntry?.description ?? profile.description,
+        category: leaderboardEntry?.category ?? profile.tags?.[0] ?? 'General',
+        score: leaderboardEntry?.score ?? profile.score ?? 0,
+        rank: leaderboardEntry?.rank ?? profile.rank ?? index + 1,
+        previousRank: leaderboardEntry?.previousRank,
+        change: leaderboardEntry?.change ?? '+0',
+        tokenSymbol: leaderboardEntry?.tokenSymbol ?? fallbackTokenSymbol,
+        tokenPrice: leaderboardEntry?.tokenPrice ?? undefined,
+        priceChange: leaderboardEntry?.priceChange ?? '+0%',
+        marketCap: leaderboardEntry?.marketCap ?? undefined,
+        holders: leaderboardEntry?.holders ?? undefined,
+        verified: leaderboardEntry?.verified ?? profile.verified ?? false,
+        githubStats: leaderboardEntry?.githubStats ?? undefined,
+        socialStats: leaderboardEntry?.socialStats ?? undefined,
+        platformStats: leaderboardEntry?.platformStats ?? undefined,
+        competitionsWon: leaderboardEntry?.competitionsWon ?? 0,
+        website: leaderboardEntry?.website ?? profile.website,
+        github: leaderboardEntry?.github ?? profile.github,
+        twitter: leaderboardEntry?.twitter ?? profile.twitter,
+        createdAt: leaderboardEntry?.createdAt ?? profile.createdAt,
+        updatedAt: leaderboardEntry?.updatedAt ?? profile.updatedAt,
+      }
+
+      return { profile, metrics: mergedMetrics }
+    })
+  }, [startupProfiles, leaderboardEntries])
+
+  const startupProfileMap = useMemo(() => {
+    const map = new Map<string, StartupProfile>()
+    startupsWithMetrics.forEach(({ profile, metrics }) => {
+      if (profile.id) map.set(profile.id, profile)
+      if (metrics.startupId) map.set(metrics.startupId, profile)
+    })
+    return map
+  }, [startupsWithMetrics])
+
+  const categoryOptions = useMemo(() => {
+    const categories = new Set<string>()
+    startupsWithMetrics.forEach(({ metrics }) => {
+      if (metrics.category) {
+        categories.add(metrics.category)
+      }
+    })
+    return Array.from(categories).sort((a, b) => a.localeCompare(b))
+  }, [startupsWithMetrics])
+
+  const filteredStartups = useMemo(() => {
+    const loweredSearch = searchQuery.trim().toLowerCase()
+
+    const base = startupsWithMetrics.filter(({ metrics, profile }) => {
+      const categoryValue = metrics.category ?? 'General'
       const matchesSearch =
-        startup.name.toLowerCase().includes(loweredSearch) ||
-        startup.category.toLowerCase().includes(loweredSearch)
-      const matchesCategory = selectedCategory === 'all' || startup.category === selectedCategory
+        loweredSearch.length === 0 ||
+        metrics.name.toLowerCase().includes(loweredSearch) ||
+        categoryValue.toLowerCase().includes(loweredSearch) ||
+        (profile.tags ?? []).some((tag) => tag.toLowerCase().includes(loweredSearch))
+
+      const matchesCategory =
+        selectedCategory === 'all' ||
+        categoryValue.toLowerCase() === selectedCategory.toLowerCase()
+
+      return matchesSearch && matchesCategory
+    })
+
+    const sorted = [...base]
+
+    if (sortBy === 'score') {
+      sorted.sort((a, b) => (b.metrics.score ?? 0) - (a.metrics.score ?? 0))
+    } else if (sortBy === 'holders') {
+      sorted.sort((a, b) => (b.metrics.holders ?? 0) - (a.metrics.holders ?? 0))
+    }
+
+    return sorted
+  }, [startupsWithMetrics, searchQuery, selectedCategory, sortBy])
+
+  const filteredLeaderboard = useMemo(() => {
+    const loweredSearch = searchQuery.trim().toLowerCase()
+
+    const base = leaderboardEntries.filter((entry) => {
+      const categoryValue = entry.category ?? 'General'
+      const matchesSearch =
+        loweredSearch.length === 0 ||
+        entry.name.toLowerCase().includes(loweredSearch) ||
+        categoryValue.toLowerCase().includes(loweredSearch)
+
+      const matchesCategory =
+        selectedCategory === 'all' ||
+        categoryValue.toLowerCase() === selectedCategory.toLowerCase()
+
       return matchesSearch && matchesCategory
     })
 
@@ -321,7 +550,64 @@ export default function Leaderboard() {
     }
 
     return base
-  }, [dataToRender, searchQuery, selectedCategory, sortBy])
+  }, [leaderboardEntries, searchQuery, selectedCategory, sortBy])
+
+  const openDirectDonation = (metrics: LeaderboardEntry, profile?: StartupProfile) => {
+    if (!isConnected) {
+      window.alert('Bağış yapabilmek için önce cüzdanınızı bağlamanız gerekiyor.')
+      return
+    }
+    setActiveDonation({ metrics, profile })
+  }
+
+  const openDirectDonationByMetrics = (metrics: LeaderboardEntry) => {
+    const profile = metrics.startupId ? startupProfileMap.get(metrics.startupId) : undefined
+    openDirectDonation(metrics, profile)
+  }
+
+  const closeDirectDonation = () => {
+    setActiveDonation(null)
+  }
+
+  const handleConfirmDirectDonation = async (amount: number, _txId: string) => {
+    if (!activeDonation) return;
+
+    // Enforce minimum on the client too
+    if (amount < MIN_DONATION_STX) {
+      window.alert(`Minimum bağış ${MIN_DONATION_STX} STX`);
+      return;
+    }
+
+    const recipient = activeDonation.profile?.ownerAddress ?? activeDonation.metrics.founder ?? '';
+    if (!recipient) {
+      window.alert('Alıcı cüzdanı bulunamadı.');
+      return;
+    }
+
+    try {
+      // Trigger Leather & wait for broadcast
+      const txId = await sendStxDonation(recipient, amount);
+
+      const record: DirectDonationRecord = {
+        id: `direct-${activeDonation.metrics.startupId ?? activeDonation.metrics.id}-${Date.now()}`,
+        startupId: activeDonation.metrics.startupId ?? activeDonation.metrics.id,
+        startupName: activeDonation.metrics.name,
+        amount,
+        timestamp: new Date().toISOString(),
+        recipient,
+        txId,
+      };
+
+      setDirectDonationLog((prev) => [record, ...prev].slice(0, 8));
+      setActiveDonation(null);
+      window.setTimeout(() => {
+        window.alert('Bağış işlemi gönderildi. İşlem zincirde onaylandıkça görünür.');
+      }, 0);
+    } catch (err: any) {
+      console.error('Donation transfer failed', err);
+      window.alert(err?.message || 'Bağış işlemi iptal edildi veya başarısız oldu.');
+    }
+  };
 
   const getRankIcon = (rank: number) => {
     if (rank === 1) return <Crown className="w-6 h-6 text-yellow-500" />
@@ -338,6 +624,7 @@ export default function Leaderboard() {
   }
 
   const StartupRow = ({ startup, index }: { startup: LeaderboardEntry; index: number }) => {
+    const profile = startup.startupId ? startupProfileMap.get(startup.startupId) : undefined
     const tokenSymbol = startup.tokenSymbol ?? startup.name.slice(0, 2).toUpperCase()
     const changeDisplay = startup.change ?? '+0'
     const price = typeof startup.tokenPrice === 'number' ? startup.tokenPrice : 0
@@ -355,6 +642,8 @@ export default function Leaderboard() {
     const registrationText = createdAtDate
       ? `Registered ${createdAtDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
       : null
+    const ownerAddress = profile?.ownerAddress ?? startup.founder ?? 'Belirtilmemiş'
+    const walletLabel = ownerAddress && ownerAddress !== 'Belirtilmemiş' ? ownerAddress : 'cüzdan bilgisi yakında'
 
     return (
       <div
@@ -386,9 +675,12 @@ export default function Leaderboard() {
                   )}
                 </div>
                 {startup.description && <p className="text-gray-600 text-sm max-w-md">{startup.description}</p>}
-                <div className="flex items-center space-x-4 text-xs text-gray-500">
+                <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500">
                   {startup.founder && <span>by {startup.founder}</span>}
                   <span className="px-2 py-1 bg-gray-100 rounded-full">{startup.category}</span>
+                  {profile?.ownerAddress && (
+                    <span className="break-all">Cüzdan: {profile.ownerAddress}</span>
+                  )}
                 </div>
                 {registrationText && (
                   <div className="flex items-center space-x-2 text-xs text-gray-500">
@@ -476,9 +768,20 @@ export default function Leaderboard() {
               </a>
             </div>
 
-            <button className="px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white rounded-lg text-sm font-medium transition-all">
-              View Details
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => openDirectDonationByMetrics(startup)}
+                className="px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white rounded-lg text-sm font-medium transition-all flex items-center space-x-2"
+              >
+                <Coins className="w-4 h-4" />
+                <span>Bağış Yap</span>
+              </button>
+              <button className="px-4 py-2 border border-gray-300 hover:border-gray-400 text-gray-700 rounded-lg text-sm font-medium transition-all">
+                View Details
+              </button>
+            </div>
+
+            <div className="text-xs text-gray-500">Minimum bağış {MIN_DONATION_STX} STX. Bağış, Leather ile doğrudan bu cüzdana gönderilir ({walletLabel}).</div>
 
             {(startup.competitionsWon ?? 0) > 0 && (
               <div className="flex items-center space-x-1 text-xs text-orange-600">
@@ -487,6 +790,176 @@ export default function Leaderboard() {
               </div>
             )}
           </div>
+        </div>
+      </div>
+    )
+  }
+
+  const StartupCard = ({ profile, metrics, onDonate }: { profile: StartupProfile; metrics: LeaderboardEntry; onDonate: (metrics: LeaderboardEntry, profile: StartupProfile) => void }) => {
+    const tokenSymbol = metrics.tokenSymbol ?? profile.tokenSymbol ?? profile.tokenName ?? (metrics.name ?? 'ST').slice(0, 2).toUpperCase()
+    const changeDisplay = metrics.change ?? '+0'
+    const price = typeof metrics.tokenPrice === 'number' ? metrics.tokenPrice : null
+    const priceChangeDisplay = metrics.priceChange ?? '+0%'
+    const holdersDisplay = metrics.holders ?? 0
+    const marketCapDisplay = typeof metrics.marketCap === 'number' ? `${(metrics.marketCap / 1000).toFixed(0)}K STX` : '--'
+    const githubStats = metrics.githubStats ?? { stars: 0, commits: 0, forks: 0 }
+    const twitterFollowers = metrics.socialStats?.twitterFollowers
+
+    const createdAtSource = typeof profile.createdAt === 'string'
+      ? profile.createdAt
+      : typeof metrics.createdAt === 'string'
+        ? metrics.createdAt
+        : undefined
+    const createdAtDate = createdAtSource ? new Date(createdAtSource) : null
+    const isNew = createdAtDate ? Date.now() - createdAtDate.getTime() <= NEW_ENTRY_WINDOW_MS : false
+    const createdAtLabel = createdAtDate
+      ? createdAtDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+      : null
+
+    const category = metrics.category ?? profile.tags?.[0] ?? 'General'
+    const additionalTags = (profile.tags ?? []).filter((tag) => tag !== category)
+
+    const websiteHref = metrics.website ?? profile.website ?? '#'
+    const githubHref = metrics.github ?? profile.github ?? '#'
+    const twitterRaw = metrics.twitter ?? profile.twitter ?? ''
+    const twitterHref = twitterRaw
+      ? twitterRaw.startsWith('http')
+        ? twitterRaw
+        : `https://twitter.com/${twitterRaw.replace('@', '')}`
+      : '#'
+
+    const priceChangeClass = priceChangeDisplay.startsWith('+')
+      ? 'text-green-600'
+      : priceChangeDisplay.startsWith('-')
+        ? 'text-red-600'
+        : 'text-gray-500'
+
+    const changeClass = changeDisplay.startsWith('+')
+      ? 'text-green-600'
+      : changeDisplay.startsWith('-')
+        ? 'text-red-600'
+        : 'text-gray-500'
+
+    const twitterFollowersDisplay = typeof twitterFollowers === 'number'
+      ? twitterFollowers.toLocaleString()
+      : '--'
+
+    return (
+      <div className="bg-white/80 backdrop-blur-sm border-2 border-gray-200 rounded-3xl p-6 transition-all hover:shadow-xl hover:scale-[1.01]">
+        <div className="flex flex-col gap-6">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <div className="w-16 h-16 bg-gradient-to-r from-orange-500 to-red-500 rounded-2xl flex items-center justify-center text-white text-xl font-bold">
+                {tokenSymbol.slice(0, 2)}
+              </div>
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-xl font-bold text-gray-900">{metrics.name}</h3>
+                  {metrics.verified && <Award className="w-5 h-5 text-blue-500" />}
+                  {isNew && (
+                    <span className="px-2 py-1 text-xs font-semibold text-white bg-green-500 rounded-full">
+                      New
+                    </span>
+                  )}
+                </div>
+                {metrics.description && (
+                  <p className="text-sm text-gray-600 max-w-xl leading-relaxed">{metrics.description}</p>
+                )}
+                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                  <span className="px-2 py-1 bg-gray-100 rounded-full">{category}</span>
+                  {additionalTags.map((tag) => (
+                    <span key={tag} className="px-2 py-1 bg-gray-100 rounded-full capitalize">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+                {profile.ownerAddress && (
+                  <div className="text-xs text-gray-500 break-all">Cüzdan: {profile.ownerAddress}</div>
+                )}
+                {createdAtLabel && (
+                  <div className="flex items-center space-x-2 text-xs text-gray-500">
+                    <Rocket className={`w-3 h-3 ${isNew ? 'text-green-500' : 'text-gray-400'}`} />
+                    <span>Joined {createdAtLabel}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="text-right space-y-1">
+              <div className="text-xs text-gray-500">Score</div>
+              <div className="text-2xl font-bold text-gray-900">{(metrics.score ?? 0).toLocaleString()}</div>
+              <div className={`text-xs font-medium ${changeClass}`}>{changeDisplay}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div className="space-y-1">
+              <div className="text-xs text-gray-500">Token Price</div>
+              <div className="font-semibold text-gray-900">{price !== null ? `$${price.toFixed(3)}` : '--'}</div>
+              <div className={`text-xs font-medium ${priceChangeClass}`}>{priceChangeDisplay}</div>
+            </div>
+            <div className="space-y-1">
+              <div className="text-xs text-gray-500">Holders</div>
+              <div className="font-semibold text-gray-900">{holdersDisplay}</div>
+              <div className="text-xs text-gray-500">{marketCapDisplay}</div>
+            </div>
+            <div className="space-y-1">
+              <div className="text-xs text-gray-500">GitHub Stars</div>
+              <div className="font-semibold text-gray-900">{githubStats.stars ?? 0}</div>
+              <div className="text-xs text-gray-500">{githubStats.commits ?? 0} commits</div>
+            </div>
+            <div className="space-y-1">
+              <div className="text-xs text-gray-500">Twitter</div>
+              <div className="font-semibold text-gray-900">{twitterFollowersDisplay}</div>
+              <div className="text-xs text-gray-500">Followers</div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center space-x-2">
+              <a
+                href={websiteHref}
+                className="w-9 h-9 bg-blue-100 hover:bg-blue-200 rounded-lg flex items-center justify-center transition-colors"
+                title="Website"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Globe className="w-4 h-4 text-blue-600" />
+              </a>
+              <a
+                href={githubHref}
+                className="w-9 h-9 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center transition-colors"
+                title="GitHub"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Github className="w-4 h-4 text-gray-600" />
+              </a>
+              <a
+                href={twitterHref}
+                className="w-9 h-9 bg-sky-100 hover:bg-sky-200 rounded-lg flex items-center justify-center transition-colors"
+                title="Twitter"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Twitter className="w-4 h-4 text-sky-600" />
+              </a>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => onDonate(metrics, profile)}
+                className="px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white rounded-lg text-sm font-medium transition-all flex items-center space-x-2"
+              >
+                <Coins className="w-4 h-4" />
+                <span>Bağış Yap</span>
+              </button>
+              <button className="px-4 py-2 border border-gray-300 hover:border-gray-400 text-gray-700 rounded-lg text-sm font-medium transition-all">
+                View Details
+              </button>
+            </div>
+          </div>
+          <div className="text-xs text-gray-500">Minimum bağış {MIN_DONATION_STX} STX. Bağış, Leather ile doğrudan girişim sahibinin cüzdanına gönderilir ({profile.ownerAddress ?? 'cüzdan bilgisi yakında'}).</div>
         </div>
       </div>
     )
@@ -507,14 +980,14 @@ export default function Leaderboard() {
           </div>
 
           <h1 className="text-5xl md:text-6xl font-black text-gray-900">
-            Startup
+            Explore
             <span className="block bg-gradient-to-r from-orange-600 via-red-500 to-pink-500 bg-clip-text text-transparent">
-              Leaderboard
+              Startups
             </span>
           </h1>
           <p className="text-xl text-gray-600 max-w-3xl mx-auto">
-            Discover the top-performing startups in the StartEx ecosystem. Rankings based on community engagement,
-            development activity, and platform growth.
+            Browse every registered startup on StartEx, track their live scores, token performance, and growth metrics.
+            The leaderboard is still here—scroll down for the latest rankings.
           </p>
         </div>
 
@@ -537,7 +1010,7 @@ export default function Leaderboard() {
               className="px-4 py-3 bg-white/80 backdrop-blur-sm border border-gray-200 rounded-2xl focus:outline-none focus:border-orange-500"
             >
               <option value="all">All Categories</option>
-              {CATEGORY_OPTIONS.map((category) => (
+              {categoryOptions.map((category) => (
                 <option key={category} value={category}>
                   {category}
                 </option>
@@ -591,90 +1064,164 @@ export default function Leaderboard() {
             </span>
           )}
         </div>
+        <section className="space-y-6 mb-16">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="space-y-2">
+              <h2 className="text-3xl font-bold text-gray-900">Registered Startups</h2>
+              <p className="text-gray-600">
+                All startups registered on StartEx with up-to-date token, community, and development metrics.
+              </p>
+            </div>
+            <div className="flex items-center text-sm text-gray-500">
+              <span className="px-4 py-2 bg-white/70 border border-gray-200 rounded-full">
+                {filteredStartups.length} of {startupsWithMetrics.length} showing
+              </span>
+            </div>
+          </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-          {filteredData.slice(0, 3).map((startup, index) => {
-            const tokenSymbol = startup.tokenSymbol ?? startup.name.slice(0, 2).toUpperCase()
-            const changeDisplay = startup.change ?? '+0'
-            const price = typeof startup.tokenPrice === 'number' ? startup.tokenPrice : 0
-            const holdersDisplay = startup.holders ?? 0
+          {startupsError && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-2xl">
+              {startupsError}
+            </div>
+          )}
 
-            return (
-              <div
-                key={startup.id}
-                className={`relative ${
-                  index === 0 ? 'md:order-2 transform md:scale-110' : index === 1 ? 'md:order-1' : 'md:order-3'
-                }`}
-              >
-                <div
-                  className={`bg-white/90 backdrop-blur-sm border-2 rounded-3xl p-8 text-center transition-all hover:shadow-2xl ${
-                    index === 0
-                      ? 'border-yellow-300 bg-gradient-to-b from-yellow-50 to-orange-50'
-                      : index === 1
-                        ? 'border-gray-300 bg-gradient-to-b from-gray-50 to-slate-50'
-                        : 'border-orange-300 bg-gradient-to-b from-orange-50 to-red-50'
-                  }`}
-                >
-                  <div className="space-y-4">
-                    <div className="flex justify-center">{getRankIcon(startup.rank ?? index + 1)}</div>
-
-                    <div className="w-20 h-20 bg-gradient-to-r from-orange-500 to-red-500 rounded-full flex items-center justify-center mx-auto">
-                      <span className="text-white font-bold text-2xl">{tokenSymbol.slice(0, 2)}</span>
+          {directDonationLog.length > 0 && (
+            <div className="bg-white/70 border border-orange-200 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-900">Son Direkt Bağışlar</h3>
+                <span className="text-xs text-gray-500">Toplam {directDonationLog.length}</span>
+              </div>
+              <div className="space-y-2">
+                {directDonationLog.map((donation) => (
+                  <div key={donation.id} className="flex items-center justify-between text-xs text-gray-600 bg-white/70 border border-gray-200 rounded-xl px-3 py-2">
+                    <div className="flex flex-col">
+                      <span className="font-semibold text-gray-900">{donation.startupName}</span>
+                      <span className="text-[10px] text-gray-400">TX: {(donation.txId ?? '').slice(0, 10)}…</span>
                     </div>
-
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-center space-x-2">
-                        <h3 className="text-xl font-bold text-gray-900">{startup.name}</h3>
-                        {startup.verified && <Award className="w-5 h-5 text-blue-500" />}
-                      </div>
-                      {startup.description && <p className="text-sm text-gray-600">{startup.description}</p>}
-                      <div className="text-xs text-gray-500">{startup.category}</div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <div className="text-3xl font-bold text-gray-900">{(startup.score ?? 0).toLocaleString()}</div>
-                      <div className="text-sm text-gray-500">Total Score</div>
-                      <div
-                        className={`text-sm font-medium ${
-                          changeDisplay.startsWith('+')
-                            ? 'text-green-600'
-                            : changeDisplay.startsWith('-')
-                              ? 'text-red-600'
-                              : 'text-gray-500'
-                        }`}
-                      >
-                        {changeDisplay} this week
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                      <div>
-                        <div className="font-bold text-blue-600">${price.toFixed(3)}</div>
-                        <div className="text-gray-500">Price</div>
-                      </div>
-                      <div>
-                        <div className="font-bold text-purple-600">{holdersDisplay}</div>
-                        <div className="text-gray-500">Holders</div>
-                      </div>
+                    <div className="text-right text-[10px] text-gray-400 space-y-1">
+                      <div className="text-sm font-semibold text-gray-900">{donation.amount.toFixed(2)} STX</div>
+                      <div>{new Date(donation.timestamp).toLocaleString()}</div>
+                      <div>{(donation.recipient ?? 'belirtilmemiş').slice(0, 10)}…</div>
                     </div>
                   </div>
-                </div>
+                ))}
               </div>
-            )
-          })}
-        </div>
+            </div>
+          )}
 
-        <div className="space-y-4">
-          <h2 className="text-3xl font-bold text-gray-900 mb-6">Full Rankings</h2>
-          {filteredData.slice(3).map((startup, index) => (
-            <StartupRow key={startup.id} startup={startup} index={index + 3} />
-          ))}
-          {filteredData.length === 0 && (
+          {isLoadingStartups ? (
+            <div className="flex items-center justify-center py-12 space-x-3 text-sm text-gray-500">
+              <div className="w-3 h-3 rounded-full bg-orange-400 animate-pulse" />
+              <span>Loading startups…</span>
+            </div>
+          ) : filteredStartups.length > 0 ? (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              {filteredStartups.map(({ profile, metrics }) => (
+                <StartupCard
+                  key={`${metrics.id}-${profile.id}`}
+                  profile={profile}
+                  metrics={metrics}
+                  onDonate={openDirectDonation}
+                />
+              ))}
+            </div>
+          ) : (
             <div className="bg-white/70 border border-dashed border-orange-300 rounded-2xl p-12 text-center text-gray-500">
               No startups match the current filters yet.
             </div>
           )}
-        </div>
+        </section>
+
+        <section className="space-y-8">
+          <div className="space-y-2">
+            <h2 className="text-3xl font-bold text-gray-900">Leaderboard</h2>
+            <p className="text-gray-600">Top performers based on the selected period.</p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {filteredLeaderboard.slice(0, 3).map((startup, index) => {
+              const tokenSymbol = startup.tokenSymbol ?? startup.name.slice(0, 2).toUpperCase()
+              const changeDisplay = startup.change ?? '+0'
+              const price = typeof startup.tokenPrice === 'number' ? startup.tokenPrice : 0
+              const holdersDisplay = startup.holders ?? 0
+
+              return (
+                <div
+                  key={startup.id}
+                  className={`relative ${
+                    index === 0 ? 'md:order-2 transform md:scale-110' : index === 1 ? 'md:order-1' : 'md:order-3'
+                  }`}
+                >
+                  <div
+                    className={`bg-white/90 backdrop-blur-sm border-2 rounded-3xl p-8 text-center transition-all hover:shadow-2xl ${
+                      index === 0
+                        ? 'border-yellow-300 bg-gradient-to-b from-yellow-50 to-orange-50'
+                        : index === 1
+                          ? 'border-gray-300 bg-gradient-to-b from-gray-50 to-slate-50'
+                          : 'border-orange-300 bg-gradient-to-b from-orange-50 to-red-50'
+                    }`}
+                  >
+                    <div className="space-y-4">
+                      <div className="flex justify-center">{getRankIcon(startup.rank ?? index + 1)}</div>
+
+                      <div className="w-20 h-20 bg-gradient-to-r from-orange-500 to-red-500 rounded-full flex items-center justify-center mx-auto">
+                        <span className="text-white font-bold text-2xl">{tokenSymbol.slice(0, 2)}</span>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-center space-x-2">
+                          <h3 className="text-xl font-bold text-gray-900">{startup.name}</h3>
+                          {startup.verified && <Award className="w-5 h-5 text-blue-500" />}
+                        </div>
+                        {startup.description && <p className="text-sm text-gray-600">{startup.description}</p>}
+                        <div className="text-xs text-gray-500">{startup.category}</div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="text-3xl font-bold text-gray-900">{(startup.score ?? 0).toLocaleString()}</div>
+                        <div className="text-sm text-gray-500">Total Score</div>
+                        <div
+                          className={`text-sm font-medium ${
+                            changeDisplay.startsWith('+')
+                              ? 'text-green-600'
+                              : changeDisplay.startsWith('-')
+                                ? 'text-red-600'
+                                : 'text-gray-500'
+                          }`}
+                        >
+                          {changeDisplay} this week
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                          <div className="font-bold text-blue-600">${price.toFixed(3)}</div>
+                          <div className="text-gray-500">Price</div>
+                        </div>
+                        <div>
+                          <div className="font-bold text-purple-600">{holdersDisplay}</div>
+                          <div className="text-gray-500">Holders</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="space-y-4">
+            <h3 className="text-2xl font-bold text-gray-900">Full Rankings</h3>
+            {filteredLeaderboard.slice(3).map((startup, index) => (
+              <StartupRow key={startup.id} startup={startup} index={index + 3} />
+            ))}
+            {filteredLeaderboard.length === 0 && (
+              <div className="bg-white/70 border border-dashed border-orange-300 rounded-2xl p-12 text-center text-gray-500">
+                No leaderboard entries match the current filters yet.
+              </div>
+            )}
+          </div>
+        </section>
 
         <div className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-6">
           {[
@@ -693,6 +1240,22 @@ export default function Leaderboard() {
             )
           })}
         </div>
+
+        <DonationModal
+          isOpen={!!activeDonation}
+          onClose={closeDirectDonation}
+          minAmount={MIN_DONATION_STX}
+          title={activeDonation ? `${activeDonation.metrics.name} için bağış yap` : 'Bağış Yap'}
+          description={
+            activeDonation
+              ? `Bağış, cüzdanınızdan otomatik olarak ${(activeDonation.profile?.ownerAddress ?? activeDonation.metrics.founder ?? 'belirtilmemiş cüzdan')} adresine gönderilecektir. Minimum bağış ${MIN_DONATION_STX} STX.`
+              : undefined
+          }
+          onConfirm={async (amount, txId) => {
+            if (!activeDonation) return
+            await handleConfirmDirectDonation(amount, txId)
+          }}
+        />
       </div>
     </div>
   )

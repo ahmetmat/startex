@@ -60,8 +60,10 @@ export const getStartupProfile = async (startupId: string) => {
   return snapshot.exists() ? (snapshot.data() as StartupProfile) : null
 }
 
+// List **all** startups without ordering/limit so nothing is hidden by query constraints.
+// NOTE: `limitCount` is kept in the signature for backward compatibility but is not used.
 export const listStartupProfiles = async (limitCount = 20) => {
-  const snapshot = await getDocs(query(getCollection('startups'), orderBy('score', 'desc'), limit(limitCount)))
+  const snapshot = await getDocs(getCollection('startups'))
   return snapshot.docs.map((docSnap) => docSnap.data() as StartupProfile)
 }
 
