@@ -42,25 +42,39 @@ const METRICS_NAME = process.env.NEXT_PUBLIC_METRICS_NAME || 'scoring-system'
 const COMPETITION_ADDR = process.env.NEXT_PUBLIC_COMPETITION_ADDR || ''
 const COMPETITION_NAME = process.env.NEXT_PUBLIC_COMPETITION_NAME || 'competition'
 
-function assertEnv() {
-  const missing: string[] = []
-  if (!REGISTRY_ADDR) missing.push('NEXT_PUBLIC_REGISTRY_ADDR')
-  if (!TOKEN_ADDR) missing.push('NEXT_PUBLIC_TOKEN_ADDR')
-  if (!METRICS_ADDR) missing.push('NEXT_PUBLIC_METRICS_ADDR')
-  if (!COMPETITION_ADDR) missing.push('NEXT_PUBLIC_COMPETITION_ADDR')
-  if (missing.length) {
-    throw new Error(
-      `Missing env: ${missing.join(
+const missingEnvVars = [
+  !REGISTRY_ADDR && 'NEXT_PUBLIC_REGISTRY_ADDR',
+  !TOKEN_ADDR && 'NEXT_PUBLIC_TOKEN_ADDR',
+  !METRICS_ADDR && 'NEXT_PUBLIC_METRICS_ADDR',
+  !COMPETITION_ADDR && 'NEXT_PUBLIC_COMPETITION_ADDR',
+].filter(Boolean) as string[]
+
+const ENV_READY = missingEnvVars.length === 0
+const MISSING_ENV_MESSAGE =
+  missingEnvVars.length > 0
+    ? `Missing env: ${missingEnvVars.join(
         ', '
       )}. Testnet deploy dosyanızdaki deployer adresini bu değişkenlere yazın.`
-    )
+    : ''
+
+if (!ENV_READY && typeof window !== 'undefined') {
+  // In development we want the UI to load while still surfacing the issue once
+  if (process.env.NODE_ENV !== 'production') {
+    console.warn(MISSING_ENV_MESSAGE)
+  } else {
+    throw new Error(MISSING_ENV_MESSAGE)
   }
 }
-assertEnv()
 
 /* =========================================================================================
  * LOW-LEVEL HELPERS
  * =======================================================================================*/
+
+const ensureContractsConfigured = () => {
+  if (!ENV_READY) {
+    throw new Error(MISSING_ENV_MESSAGE)
+  }
+}
 
 /** Read-only (REST) – Clarity args -> hex, result -> cvToJSON */
 async function callReadOnly(
@@ -70,6 +84,7 @@ async function callReadOnly(
   functionArgs: ClarityValue[] = [],
   sender: string = contractAddress
 ) {
+  ensureContractsConfigured()
   const url = `${CORE_API_URL}/v2/contracts/call-read/${contractAddress}/${contractName}/${functionName}`
   const body = {
     sender,
@@ -102,6 +117,7 @@ function makeContractCall(params: {
   functionArgs: ClarityValue[]
   postConditions?: any[]
 }): Promise<{ txId: string }> {
+  ensureContractsConfigured()
   const { contractAddress, contractName, functionName, functionArgs, postConditions = [] } = params
 
   return new Promise((resolve, reject) => {
@@ -280,54 +296,34 @@ export const CompetitionContract = {
  * =======================================================================================*/
 
 // src/lib/contracts/calls.ts  -> mevcut fonksiyonu bununla değiştir
+// startex-frontend/src/lib/contracts/calls.ts içindeki waitForTransaction'ı bununla değiştir
 export async function waitForTransaction(
   txId: string,
-  { attempts = 60, intervalMs = 2000 } = {}
-): Promise<{ ok: boolean; status?: string; reason?: string; txResult?: any }> {
-  const url = `${CORE_API_URL}/extended/v1/tx/${txId}`;
+  { attempts = 40, intervalMs = 2000 } = {}
+): Promise<{ ok: boolean; status?: string; reason?: string }> {
+  const url = `${CORE_API_URL}/extended/v1/tx/${txId}`
+
   for (let i = 0; i < attempts; i++) {
     try {
-      const r = await fetch(url);
-      if (r.ok) {
-        const j = await r.json();
-        const s: string | undefined = j?.tx_status;
-        // explorer linki logla; hemen tıklayıp bak
-        console.log(`TX [${s ?? 'unknown'}]:`, `https://explorer.hiro.so/txid/${txId}?chain=${STACKS_NETWORK}`);
+      const res = await fetch(url)
+      if (res.ok) {
+        const j = await res.json()
+        const s: string | undefined = j?.tx_status
+        const reason: string | undefined =
+          j?.tx_result?.repr || j?.tx_result?.hex || j?.reason || j?.error
 
-        if (s === 'success') return { ok: true, status: s, txResult: j?.tx_result };
-
-        if (s === 'pending' || s === 'submitted' || s === 'processing' || s === 'success_microblock') {
-          // beklemeye devam
-        } else if (s === 'abort_by_response' || s === 'abort_by_post_condition' || s === 'rejected' || s === 'failed') {
-          let serialized = 'unknown';
-          if (j) {
-            try {
-              serialized = JSON.stringify(j);
-            } catch {
-              serialized = '[unserializable tx payload]';
-            }
-          }
-
-          const reason =
-            j?.tx_failure_reason?.repr ||
-            j?.tx_failure_reason?.cause ||
-            j?.tx_result?.repr ||
-            j?.tx_result?.hex ||
-            j?.error ||
-            j?.reason ||
-            serialized;
-
-          console.error('Transaction failed details:', { status: s, reason });
-          return { ok: false, status: s, reason, txResult: j?.tx_result };
-        } else if (s) {
-          // başka final durum
-          return { ok: false, status: s, txResult: j?.tx_result };
+        if (s === 'success') {
+          return { ok: true, status: s }
         }
+        if (s === 'abort_by_response' || s === 'abort_by_post_condition' || s === 'rejected') {
+          return { ok: false, status: s, reason }
+        }
+        // 'pending' | 'submitted' | bilinmeyen durumlar -> beklemeye devam
       }
-    } catch (e) {
-      console.warn('waitForTransaction error', e);
+    } catch (e: any) {
+      // ağ hatası vs => bir kez daha dene
     }
-    await new Promise(res => setTimeout(res, intervalMs));
+    await new Promise((r) => setTimeout(r, intervalMs))
   }
-  return { ok: false, status: 'timeout' };
+  return { ok: false, status: 'timeout', reason: 'transaction not confirmed in time' }
 }

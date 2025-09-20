@@ -23,6 +23,9 @@ import {
   Award
 } from 'lucide-react'
 
+import { HeaderWalletControls } from '@/components/HeaderWalletControls'
+import { MainHeader } from '@/components/MainHeader'
+
 import type {
   StartupProfile,
   MetricSnapshot,
@@ -302,33 +305,22 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-100">
-      <header className="bg-white/80 backdrop-blur-sm border-b border-orange-200/50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center space-x-4">
-              <Rocket className="w-8 h-8 text-orange-500" />
-              <span className="text-2xl font-black bg-gradient-to-r from-orange-600 to-red-500 bg-clip-text text-transparent">
-                StartEx
-              </span>
-            </div>
+      <MainHeader
+        highlightPath="/dashboard"
+        rightSlot={
+          <>
+            <HeaderWalletControls />
+            <button
+              onClick={() => (window.location.href = '/')}
+              className="text-gray-600 hover:text-orange-600 font-medium transition-colors"
+            >
+              Back to Home
+            </button>
+          </>
+        }
+      />
 
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2 bg-gradient-to-r from-green-100 to-emerald-100 px-4 py-2 rounded-full">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                <span className="text-sm font-medium text-green-800">Connected</span>
-              </div>
-              <button
-                onClick={() => (window.location.href = '/')}
-                className="text-gray-600 hover:text-orange-600 font-medium transition-colors"
-              >
-                Back to Home
-              </button>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         {error && (
           <div className="mb-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-2xl">
             {error}

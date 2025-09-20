@@ -1,7 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { AppConfig, UserSession } from '@stacks/auth'
+import { useState } from 'react'
 import { 
   Trophy, 
   Calendar, 
@@ -9,7 +8,6 @@ import {
   Coins, 
   Filter,
   Search,
-  Rocket,
   Award,
   Clock,
   TrendingUp,
@@ -24,11 +22,10 @@ import {
   Gift
 } from 'lucide-react'
 
-const appConfig = new AppConfig(['store_write', 'publish_data'])
-const userSession = new UserSession({ appConfig })
+import { HeaderWalletControls } from '@/components/HeaderWalletControls'
+import { MainHeader } from '@/components/MainHeader'
 
 export default function Competitions() {
-  const [userData, setUserData] = useState(null)
   const [selectedFilter, setSelectedFilter] = useState('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [competitions, setCompetitions] = useState([
@@ -131,12 +128,6 @@ export default function Competitions() {
       featured: false
     }
   ])
-
-  useEffect(() => {
-    if (userSession.isUserSignedIn()) {
-      setUserData(userSession.loadUserData() as any)
-    }
-  }, [])
 
   const filteredCompetitions = competitions.filter(comp => {
     const matchesSearch = comp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -323,43 +314,10 @@ export default function Competitions() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-100">
-      {/* Header */}
-      <header className="bg-white/80 backdrop-blur-sm border-b border-orange-200/50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center space-x-4">
-              <Rocket className="w-8 h-8 text-orange-500" />
-              <span className="text-2xl font-black bg-gradient-to-r from-orange-600 to-red-500 bg-clip-text text-transparent">
-                StartEx
-              </span>
-            </div>
-            
-            <nav className="hidden md:flex space-x-8">
-              <a href="/" className="text-gray-600 hover:text-orange-600 font-medium transition-colors">
-                Home
-              </a>
-              <a href="/dashboard" className="text-gray-600 hover:text-orange-600 font-medium transition-colors">
-                Dashboard
-              </a>
-              <a href="/competitions" className="text-orange-600 font-medium">
-                Competitions
-              </a>
-              <a href="/leaderboard" className="text-gray-600 hover:text-orange-600 font-medium transition-colors">
-                Leaderboard
-              </a>
-            </nav>
-
-            <div className="flex items-center space-x-4">
-              {userData && (
-                <div className="flex items-center space-x-2 bg-gradient-to-r from-green-100 to-emerald-100 px-4 py-2 rounded-full">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                  <span className="text-sm font-medium text-green-800">Connected</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </header>
+      <MainHeader
+        highlightPath="/competitions"
+        rightSlot={<HeaderWalletControls />}
+      />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         {/* Page Header */}

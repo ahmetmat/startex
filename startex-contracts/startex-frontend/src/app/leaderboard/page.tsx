@@ -1,8 +1,6 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { AppConfig, UserSession } from '@stacks/auth'
-import type { UserData } from '@stacks/auth'
 import {
   Trophy,
   Medal,
@@ -23,13 +21,11 @@ import {
   ExternalLink
 } from 'lucide-react'
 
-import Link from 'next/link'
+import { HeaderWalletControls } from '@/components/HeaderWalletControls'
+import { MainHeader } from '@/components/MainHeader'
 
 import type { LeaderboardEntry } from '@/lib/firebase/types'
 import { convertTimestamps, getLeaderboard } from '@/lib/firebase/firestore'
-
-const appConfig = new AppConfig(['store_write', 'publish_data'])
-const userSession = new UserSession({ appConfig })
 
 type LeaderboardPeriod = 'overall' | 'monthly' | 'weekly'
 
@@ -262,7 +258,6 @@ const PERIOD_OPTIONS: { label: string; value: LeaderboardPeriod }[] = [
 ]
 
 export default function Leaderboard() {
-  const [userData, setUserData] = useState<UserData | null>(null)
   const [selectedPeriod, setSelectedPeriod] = useState<LeaderboardPeriod>('overall')
   const [selectedCategory, setSelectedCategory] = useState<string>('all')
   const [searchQuery, setSearchQuery] = useState('')
@@ -270,12 +265,6 @@ export default function Leaderboard() {
   const [leaderboardData, setLeaderboardData] = useState<LeaderboardEntry[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (userSession.isUserSignedIn()) {
-      setUserData(userSession.loadUserData())
-    }
-  }, [])
 
   useEffect(() => {
     let isMounted = true
@@ -487,42 +476,10 @@ export default function Leaderboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-100">
-      <header className="bg-white/80 backdrop-blur-sm border-b border-orange-200/50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center space-x-4">
-              <Rocket className="w-8 h-8 text-orange-500" />
-              <span className="text-2xl font-black bg-gradient-to-r from-orange-600 to-red-500 bg-clip-text text-transparent">
-                StartEx
-              </span>
-            </div>
-
-            <nav className="hidden md:flex space-x-8">
-              <Link href="/" className="text-gray-600 hover:text-orange-600 font-medium transition-colors">
-                Home
-              </Link>
-              <Link href="/dashboard" className="text-gray-600 hover:text-orange-600 font-medium transition-colors">
-                Dashboard
-              </Link>
-              <Link href="/competitions" className="text-gray-600 hover:text-orange-600 font-medium transition-colors">
-                Competitions
-              </Link>
-              <Link href="/leaderboard" className="text-orange-600 font-medium">
-                Leaderboard
-              </Link>
-            </nav>
-
-            <div className="flex items-center space-x-4">
-              {userData && (
-                <div className="flex items-center space-x-2 bg-gradient-to-r from-green-100 to-emerald-100 px-4 py-2 rounded-full">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                  <span className="text-sm font-medium text-green-800">Connected</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </header>
+      <MainHeader
+        highlightPath="/leaderboard"
+        rightSlot={<HeaderWalletControls />}
+      />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <div className="text-center space-y-6 mb-12">

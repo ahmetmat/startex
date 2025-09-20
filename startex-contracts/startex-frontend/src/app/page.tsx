@@ -2,13 +2,6 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import {
-  connect,
-  request,
-  getLocalStorage,
-  disconnect as stacksDisconnect,
-  isConnected as walletIsConnected,
-} from '@stacks/connect'
-import {
   Rocket,
   Trophy,
   TrendingUp,
@@ -22,13 +15,11 @@ import {
   Play,
 } from 'lucide-react'
 import Link from 'next/link'
+import { HeaderWalletControls } from '@/components/HeaderWalletControls'
+import { MainHeader, type NavItem } from '@/components/MainHeader'
 
 import type { LeaderboardEntry, StartupProfile } from '@/lib/firebase/types'
 import { convertTimestamps, getLeaderboard, listStartupProfiles } from '@/lib/firebase/firestore'
-
-type WalletAddressEntry = { symbol?: string; address?: string }
-type WalletStorage = { addresses?: WalletAddressEntry[] | { stx?: WalletAddressEntry[] } }
-type AddressesResponse = { addresses?: WalletAddressEntry[] }
 
 type AggregatedStats = {
   totalStartups: number
@@ -36,6 +27,13 @@ type AggregatedStats = {
   totalHolders: number
   totalScore: number
 }
+
+const LANDING_NAV_ITEMS: NavItem[] = [
+  { label: 'Startups', href: '/leaderboard' },
+  { label: 'Competitions', href: '/competitions' },
+  { label: 'Leaderboard', href: '/leaderboard' },
+  { label: 'Trading', href: '/trading' },
+]
 
 const FALLBACK_LEADERBOARD: LeaderboardEntry[] = [
   {
@@ -136,65 +134,19 @@ const formatCompactNumber = (value: number, prefix = '') => {
 }
 
 export default function HomePage() {
-  const [addr, setAddr] = useState<string | null>(null)
-  const [connected, setConnected] = useState(false)
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 })
   const [leaderboardData, setLeaderboardData] = useState<LeaderboardEntry[]>([])
   const [startupProfiles, setStartupProfiles] = useState<StartupProfile[]>([])
   const [isLoadingData, setIsLoadingData] = useState(false)
   const [dataError, setDataError] = useState<string | null>(null)
-  const readAddrFromStorage = () => {
-    try {
-      const data = getLocalStorage?.() as WalletStorage | undefined
-      const addresses = data?.addresses
-      const structured = !Array.isArray(addresses) ? addresses : undefined
-      const fromStructured = structured?.stx?.[0]?.address
-      const fromList = Array.isArray(addresses)
-        ? addresses.find((entry) => entry.symbol === 'STX')?.address
-        : undefined
-      const selected = fromStructured ?? fromList
-      if (selected) {
-        setAddr(selected)
-        setConnected(true)
-      }
-    } catch {
-      // ignore local storage parsing issues
-    }
-  }
 
   useEffect(() => {
-    try {
-      if (walletIsConnected?.()) {
-        readAddrFromStorage()
-      }
-    } catch {
-      readAddrFromStorage()
-    }
-
     const handleMouseMove = (event: MouseEvent) =>
       setMousePosition({ x: event.clientX, y: event.clientY })
 
     window.addEventListener('mousemove', handleMouseMove)
     return () => window.removeEventListener('mousemove', handleMouseMove)
   }, [])
-
-  const connectWallet = async () => {
-    await connect({ forceWalletSelect: true })
-    const response = (await request('getAddresses').catch(() => null)) as AddressesResponse | null
-    const selected = response?.addresses?.find((entry) => entry.symbol === 'STX')?.address ?? null
-    if (selected) {
-      setAddr(selected)
-      setConnected(true)
-    } else {
-      readAddrFromStorage()
-    }
-  }
-
-  const disconnectWallet = () => {
-    stacksDisconnect()
-    setConnected(false)
-    setAddr(null)
-  }
 
   useEffect(() => {
     let isMounted = true
@@ -281,67 +233,13 @@ export default function HomePage() {
         />
         <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZGVmcz48cGF0dGVybiBpZD0iZ3JpZCIgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBwYXR0ZXJuVW5pdHM9InVzZXJTcGFjZU9uVXNlIj48cGF0aCBkPSJNIDQwIDAgTCAwIDAgMCA0MCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZjk3MzE2IiBzdHJva2Utd2lkdGg9IjAuNSIgb3BhY2l0eT0iMC4xIi8+PC9wYXR0ZXJuPjwvZGVmcz48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSJ1cmwoI2dyaWQpIi8+PC9zdmc+')] opacity-20" />
       </div>
-      <header className="relative z-10 backdrop-blur-xl bg-white/80 border-b border-orange-200/50 shadow-lg">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-20">
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-3 group">
-                <div className="relative">
-                  <Rocket className="w-10 h-10 text-orange-500 group-hover:text-red-500 transition-all duration-300 transform group-hover:rotate-12" />
-                  <Sparkles className="w-4 h-4 text-yellow-400 absolute -top-1 -right-1 animate-pulse" />
-                </div>
-                <span className="text-3xl font-black bg-gradient-to-r from-orange-600 via-red-500 to-pink-500 bg-clip-text text-transparent">
-                  StartEx
-                </span>
-              </div>
-            </div>
-
-            <nav className="hidden md:flex space-x-8">
-              {[
-                { label: 'Startups', href: '/leaderboard' },
-                { label: 'Competitions', href: '/competitions' },
-                { label: 'Leaderboard', href: '/leaderboard' },
-                { label: 'Trading', href: '/trading' },
-              ].map((item) => (
-                <Link
-                  key={item.label}
-                  href={item.href}
-                  className="relative text-gray-700 hover:text-orange-600 font-medium transition-all duration-300 group"
-                >
-                  {item.label}
-                  <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-gradient-to-r from-orange-500 to-red-500 group-hover:w-full transition-all duration-300" />
-                </Link>
-              ))}
-            </nav>
-
-            <div className="flex items-center space-x-4">
-              {!connected ? (
-                <button
-                  onClick={connectWallet}
-                  className="relative bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white px-8 py-3 rounded-full font-bold transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
-                >
-                  <span className="relative z-10">Connect Wallet</span>
-                  <div className="absolute inset-0 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full opacity-0 hover:opacity-20 transition-opacity duration-300" />
-                </button>
-              ) : (
-                <div className="flex items-center space-x-3">
-                  <div className="bg-gradient-to-r from-green-100 to-emerald-100 px-4 py-2 rounded-full border border-green-200">
-                    <span className="text-sm font-medium text-green-800">
-                      {addr?.slice(0, 8)}...
-                    </span>
-                  </div>
-                  <button
-                    onClick={disconnectWallet}
-                    className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-full font-medium transition-all duration-300"
-                  >
-                    Disconnect
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </header>
+      <MainHeader
+        navItems={LANDING_NAV_ITEMS}
+        highlightPath="/"
+        showSparkles
+        className="relative z-30 backdrop-blur-xl shadow-lg"
+        rightSlot={<HeaderWalletControls />}
+      />
 
       <section className="relative z-10 py-24">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
