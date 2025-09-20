@@ -6,6 +6,7 @@ import {
   getLatestMetricSnapshot,
   getOrderBookSnapshot,
   saveOrderBookSnapshot,
+  saveLeaderboardEntry,
 } from './firestore'
 import type {
   StartupProfile,
@@ -62,6 +63,21 @@ export const syncGitHubMetrics = async (startup: StartupProfile) => {
 export const upsertStartupProfileWithMetrics = async (profile: StartupProfile) => {
   await createOrUpdateStartupProfile(profile)
   const snapshot = await syncGitHubMetrics(profile)
+
+  const enrichedProfile: StartupProfile = {
+    ...profile,
+    score: snapshot.aggregateScore,
+  }
+
+  await createOrUpdateStartupProfile(enrichedProfile)
+
+  const leaderboardEntry = leaderboardEntryFromProfile(enrichedProfile, snapshot)
+  await Promise.all([
+    saveLeaderboardEntry('overall', leaderboardEntry),
+    saveLeaderboardEntry('weekly', leaderboardEntry),
+    saveLeaderboardEntry('monthly', leaderboardEntry),
+  ])
+
   return snapshot
 }
 

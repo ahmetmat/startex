@@ -257,6 +257,8 @@ const PERIOD_OPTIONS: { label: string; value: LeaderboardPeriod }[] = [
   { label: 'This Week', value: 'weekly' }
 ]
 
+const NEW_ENTRY_WINDOW_MS = 48 * 60 * 60 * 1000
+
 export default function Leaderboard() {
   const [selectedPeriod, setSelectedPeriod] = useState<LeaderboardPeriod>('overall')
   const [selectedCategory, setSelectedCategory] = useState<string>('all')
@@ -348,6 +350,11 @@ export default function Leaderboard() {
     const githubHref = startup.github ?? '#'
     const twitterHandle = startup.twitter?.replace('@', '') ?? ''
     const twitterHref = twitterHandle ? `https://twitter.com/${twitterHandle}` : '#'
+    const createdAtDate = typeof startup.createdAt === 'string' ? new Date(startup.createdAt) : null
+    const isNew = createdAtDate ? Date.now() - createdAtDate.getTime() <= NEW_ENTRY_WINDOW_MS : false
+    const registrationText = createdAtDate
+      ? `Registered ${createdAtDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+      : null
 
     return (
       <div
@@ -369,15 +376,26 @@ export default function Leaderboard() {
                 <span className="text-white font-bold text-xl">{tokenSymbol.slice(0, 2)}</span>
               </div>
               <div className="space-y-1">
-                <div className="flex items-center space-x-2">
+                <div className="flex items-center flex-wrap gap-2">
                   <h3 className="text-xl font-bold text-gray-900">{startup.name}</h3>
                   {startup.verified && <Award className="w-5 h-5 text-blue-500" />}
+                  {isNew && (
+                    <span className="px-2 py-1 text-xs font-semibold text-white bg-green-500 rounded-full">
+                      New
+                    </span>
+                  )}
                 </div>
                 {startup.description && <p className="text-gray-600 text-sm max-w-md">{startup.description}</p>}
                 <div className="flex items-center space-x-4 text-xs text-gray-500">
                   {startup.founder && <span>by {startup.founder}</span>}
                   <span className="px-2 py-1 bg-gray-100 rounded-full">{startup.category}</span>
                 </div>
+                {registrationText && (
+                  <div className="flex items-center space-x-2 text-xs text-gray-500">
+                    <Rocket className={`w-3 h-3 ${isNew ? 'text-green-500' : 'text-gray-400'}`} />
+                    <span>{isNew ? 'Newly registered' : registrationText}</span>
+                  </div>
+                )}
               </div>
             </div>
           </div>

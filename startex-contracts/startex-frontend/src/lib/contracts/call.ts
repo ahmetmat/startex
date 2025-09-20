@@ -14,6 +14,8 @@ import {
   ClarityValue,
   AnchorMode,
   cvToHex,
+  PostConditionMode,
+  Pc,
 } from '@stacks/transactions'
 
 /* =========================================================================================
@@ -41,6 +43,9 @@ const METRICS_NAME = process.env.NEXT_PUBLIC_METRICS_NAME || 'scoring-system'
 
 const COMPETITION_ADDR = process.env.NEXT_PUBLIC_COMPETITION_ADDR || ''
 const COMPETITION_NAME = process.env.NEXT_PUBLIC_COMPETITION_NAME || 'competition'
+
+const TOKENIZATION_FEE_MICROSTX = 1_000_000
+const TOKENIZATION_FEE_BUFFER_MICROSTX = 200_000 // covers miner fee headroom in post condition
 
 const missingEnvVars = [
   !REGISTRY_ADDR && 'NEXT_PUBLIC_REGISTRY_ADDR',
@@ -116,9 +121,17 @@ function makeContractCall(params: {
   functionName: string
   functionArgs: ClarityValue[]
   postConditions?: any[]
+  postConditionMode?: PostConditionMode
 }): Promise<{ txId: string }> {
   ensureContractsConfigured()
-  const { contractAddress, contractName, functionName, functionArgs, postConditions = [] } = params
+  const {
+    contractAddress,
+    contractName,
+    functionName,
+    functionArgs,
+    postConditions = [],
+    postConditionMode = PostConditionMode.Deny,
+  } = params
 
   return new Promise((resolve, reject) => {
     openContractCall({
@@ -129,6 +142,7 @@ function makeContractCall(params: {
       functionName,
       functionArgs,
       postConditions,
+      postConditionMode,
       onFinish: (data) => resolve({ txId: data.txId }),
       onCancel: () => reject(new Error('Transaction cancelled')),
     })
@@ -201,8 +215,13 @@ export const TokenContract = {
     tokenSymbol: string
     initialSupply: number
     decimals: number
+    senderAddress: string
   }) {
-    const { startupId, tokenName, tokenSymbol, initialSupply, decimals } = params
+    const { startupId, tokenName, tokenSymbol, initialSupply, decimals, senderAddress } = params
+
+    if (!senderAddress) {
+      throw new Error('Sender address is required for tokenization post condition')
+    }
 
     const fnArgs: ClarityValue[] = [
       uintCV(startupId),
@@ -212,11 +231,16 @@ export const TokenContract = {
       uintCV(decimals),
     ]
 
+    const maxFee = BigInt(TOKENIZATION_FEE_MICROSTX + TOKENIZATION_FEE_BUFFER_MICROSTX)
+    const postConditions = [Pc.principal(senderAddress).willSendLte(maxFee).ustx()]
+
     return makeContractCall({
       contractAddress: TOKEN_ADDR,
       contractName: TOKEN_NAME,
       functionName: 'tokenize-startup',
       functionArgs: fnArgs,
+      postConditions,
+      postConditionMode: PostConditionMode.Deny,
     })
   },
 
@@ -301,29 +325,82 @@ export async function waitForTransaction(
   txId: string,
   { attempts = 40, intervalMs = 2000 } = {}
 ): Promise<{ ok: boolean; status?: string; reason?: string }> {
-  const url = `${CORE_API_URL}/extended/v1/tx/${txId}`
+  console.log(`Waiting for transaction ${txId}...`);
+  const url = `${CORE_API_URL}/extended/v1/tx/${txId}`;
 
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url)
+      const res = await fetch(url);
       if (res.ok) {
-        const j = await res.json()
-        const s: string | undefined = j?.tx_status
-        const reason: string | undefined =
-          j?.tx_result?.repr || j?.tx_result?.hex || j?.reason || j?.error
+        const j = await res.json();
+        const txStatus: string | undefined = j?.tx_status;
+        const txResult = j?.tx_result;
 
-        if (s === 'success') {
-          return { ok: true, status: s }
+        console.log(`Transaction ${txId} status: ${txStatus}`);
+
+        if (txStatus === 'success') {
+          return { ok: true, status: txStatus };
         }
-        if (s === 'abort_by_response' || s === 'abort_by_post_condition' || s === 'rejected') {
-          return { ok: false, status: s, reason }
+
+        if (txStatus === 'abort_by_response' || txStatus === 'abort_by_post_condition') {
+          let errorMessage = 'Transaction aborted by contract logic.'; // Default error message
+
+          // --- BUG FIX STARTS HERE ---
+          // Check if the transaction result contains a clear Clarity error `(err u...)`
+          if (txResult && typeof txResult.repr === 'string') {
+            const errorMatch = txResult.repr.match(/\(err u(\d+)\)/);
+            if (errorMatch) {
+              // If we find a specific error code, use it.
+              const errorCode = errorMatch[1];
+              errorMessage = getErrorMessage(errorCode);
+            } else {
+              // Otherwise, the contract might have returned a misleading success-like value.
+              // We'll add the raw response to the default error for debugging.
+              errorMessage += ` Response: ${txResult.repr}`;
+            }
+          }
+          // --- BUG FIX ENDS HERE ---
+          
+          return { ok: false, status: txStatus, reason: errorMessage };
         }
-        // 'pending' | 'submitted' | bilinmeyen durumlar -> beklemeye devam
+        
+        if (txStatus === 'rejected') {
+            return { ok: false, status: txStatus, reason: j.error || 'Transaction was rejected by the network.' };
+        }
+
+        // For 'pending' status, continue waiting.
       }
     } catch (e: any) {
-      // ağ hatası vs => bir kez daha dene
+      console.warn(`Error checking transaction ${txId}:`, e.message);
+      // Allow retries on network errors.
     }
-    await new Promise((r) => setTimeout(r, intervalMs))
+
+    await new Promise((r) => setTimeout(r, intervalMs));
   }
-  return { ok: false, status: 'timeout', reason: 'transaction not confirmed in time' }
+
+  return { ok: false, status: 'timeout', reason: 'Transaction not confirmed in time.' };
+}
+
+// Helper function to map error codes to messages
+function getErrorMessage(errorCode: string): string {
+  const errorMap: Record<string, string> = {
+    '100': 'Not authorized',
+    '102': 'Not found',
+    '103': 'Invalid data',
+    '200': 'Not authorized',
+    '201': 'Not found',
+    '202': 'Already tokenized',
+    '203': 'Invalid amount',
+    '300': 'Not authorized',
+    '301': 'Not found',
+    '302': 'Invalid data',
+    '400': 'Not authorized',
+    '401': 'Not found',
+    '402': 'Competition is active',
+    '403': 'Competition has ended',
+    '404': 'Already joined',
+    '405': 'Not joined',
+  }
+  
+  return errorMap[errorCode] || `Error code: ${errorCode}`
 }

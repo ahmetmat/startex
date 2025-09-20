@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   Rocket, Github, Twitter, Globe, ArrowRight, CheckCircle,
   AlertCircle, Sparkles, Zap, Coins,
@@ -38,9 +39,10 @@ type FormData = {
 type Errors = Partial<Record<keyof FormData, string>>
 
 export default function StartupRegister() {
+  const router = useRouter()
   /* State */
-  const [mounted, setMounted] = useState(false)        // SSR guard
-  const [isChecking, setIsChecking] = useState(true)   // pending sign-in / initial check
+  const [mounted, setMounted] = useState(false)       // SSR guard
+  const [isChecking, setIsChecking] = useState(true)  // pending sign-in / initial check
   const [addr, setAddr] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3 | 4>(1)
@@ -93,7 +95,7 @@ export default function StartupRegister() {
         }
       } catch (e) {
         console.error('Wallet session restore error:', e)
-        try { userSession.signUserOut() } catch {}
+        try { userSession.signUserOut() } catch { }
         setAddr(null)
         setConnected(false)
       } finally {
@@ -146,7 +148,7 @@ export default function StartupRegister() {
   const handleDisconnectWallet = () => {
     try {
       userSession.signUserOut()
-    } catch {}
+    } catch { }
     setAddr(null)
     setConnected(false)
   }
@@ -195,6 +197,8 @@ export default function StartupRegister() {
 
     setIsSubmitting(true)
     try {
+      const senderAddress = addr as string
+
       // 0) Get next startup id
       console.log('Getting next startup ID...')
       const nextIdResult = await RegistryContract.getNextStartupId()
@@ -218,8 +222,9 @@ export default function StartupRegister() {
       console.log('Startup registration tx:', txRegister)
 
       const registerStatus = await waitForTransaction(txRegister)
+      console.log('Register status:', registerStatus)
       if (!registerStatus.ok) {
-        throw new Error(`Register transaction failed: ${registerStatus.reason ?? registerStatus.status ?? 'unknown'}`)
+        throw new Error(`Register transaction failed: ${registerStatus.reason || 'Transaction failed'}`)
       }
 
       // 2) Tokenize startup
@@ -230,6 +235,7 @@ export default function StartupRegister() {
         tokenSymbol: formData.tokenSymbol.trim(),
         initialSupply: parseInt(formData.initialSupply),
         decimals: parseInt(formData.decimals),
+        senderAddress,
       })) as any
       const txTokenize = tokenizeResult?.txId || tokenizeResult?.txid
       if (!txTokenize) throw new Error('Tokenize tx did not return txid')
@@ -237,8 +243,9 @@ export default function StartupRegister() {
       console.log('Tokenization tx:', txTokenize)
 
       const tokenizeStatus = await waitForTransaction(txTokenize)
+      console.log('Tokenize status:', tokenizeStatus)
       if (!tokenizeStatus.ok) {
-        throw new Error(`Tokenize transaction failed: ${tokenizeStatus.reason ?? tokenizeStatus.status ?? 'unknown'}`)
+        throw new Error(`Tokenize transaction failed: ${tokenizeStatus.reason || 'Transaction failed'}`)
       }
 
       // 3) Initialize metrics
@@ -250,11 +257,12 @@ export default function StartupRegister() {
       console.log('Metrics initialization tx:', txMetrics)
 
       const metricsStatus = await waitForTransaction(txMetrics)
+      console.log('Metrics status:', metricsStatus)
       if (!metricsStatus.ok) {
-        throw new Error(`Metrics transaction failed: ${metricsStatus.reason ?? metricsStatus.status ?? 'unknown'}`)
+        throw new Error(`Metrics transaction failed: ${metricsStatus.reason || 'Transaction failed'}`)
       }
 
-      // 4) Set token address (sende bu helper kontrattan token adresini hesaplayıp çağırıyor varsayıyorum)
+      // 4) Set token address
       console.log('Step 4: Setting token address...')
       const setTokenResult = (await RegistryContract.setTokenAddress(nextId)) as any
       const txSetToken = setTokenResult?.txId || setTokenResult?.txid
@@ -263,9 +271,12 @@ export default function StartupRegister() {
       console.log('Set token address tx:', txSetToken)
 
       const setTokenStatus = await waitForTransaction(txSetToken)
+      console.log('Set token status:', setTokenStatus)
       if (!setTokenStatus.ok) {
-        throw new Error(`set-token-address transaction failed: ${setTokenStatus.reason ?? setTokenStatus.status ?? 'unknown'}`)
+        throw new Error(`Set token address transaction failed: ${setTokenStatus.reason || 'Transaction failed'}`)
       }
+
+      console.log('All transactions completed successfully!')
 
       // 5) Sync off-chain profile + metrics snapshot
       try {
@@ -286,11 +297,15 @@ export default function StartupRegister() {
           tokenSymbol: formData.tokenSymbol.trim(),
           totalSupply: parseInt(formData.initialSupply, 10),
         })
+        console.log('Firebase sync completed')
       } catch (syncError) {
-        console.error('Firebase sync error:', syncError)
+        console.error('Firebase sync error (non-fatal):', syncError)
+        // Firebase sync hatası kritik değil, devam edebiliriz
       }
 
       setCurrentStep(4)
+      router.replace(`/dashboard?startupId=${encodeURIComponent(String(nextId))}`)
+      return
     } catch (error: any) {
       console.error('Submit error:', error)
       const message = error?.message || 'Error submitting startup. Please try again.'
@@ -369,19 +384,17 @@ export default function StartupRegister() {
           {[1, 2, 3].map((step) => (
             <div key={step} className="flex items-center">
               <div
-                className={`w-12 h-12 rounded-full flex items-center justify-center font-bold transition-all duration-300 ${
-                  currentStep >= step
+                className={`w-12 h-12 rounded-full flex items-center justify-center font-bold transition-all duration-300 ${currentStep >= step
                     ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white scale-110'
                     : 'bg-gray-200 text-gray-500'
-                }`}
+                  }`}
               >
                 {currentStep > step ? <CheckCircle className="w-6 h-6" /> : step}
               </div>
               {step < 3 && (
                 <div
-                  className={`w-16 h-1 transition-all duration-300 ${
-                    currentStep > step ? 'bg-gradient-to-r from-orange-500 to-red-500' : 'bg-gray-200'
-                  }`}
+                  className={`w-16 h-1 transition-all duration-300 ${currentStep > step ? 'bg-gradient-to-r from-orange-500 to-red-500' : 'bg-gray-200'
+                    }`}
                 />
               )}
             </div>
@@ -416,9 +429,8 @@ export default function StartupRegister() {
                     type="text"
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${
-                      errors.name ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
-                    }`}
+                    className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${errors.name ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
+                      }`}
                     placeholder="e.g. TechStartup"
                   />
                   {errors.name && (
@@ -435,9 +447,8 @@ export default function StartupRegister() {
                     value={formData.description}
                     onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                     rows={4}
-                    className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all resize-none ${
-                      errors.description ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
-                    }`}
+                    className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all resize-none ${errors.description ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
+                      }`}
                     placeholder="Describe your startup's mission and vision..."
                   />
                   {errors.description && (
@@ -457,9 +468,8 @@ export default function StartupRegister() {
                     type="url"
                     value={formData.githubRepo}
                     onChange={(e) => setFormData({ ...formData, githubRepo: e.target.value })}
-                    className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${
-                      errors.githubRepo ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
-                    }`}
+                    className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${errors.githubRepo ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
+                      }`}
                     placeholder="https://github.com/username/repository"
                   />
                   {errors.githubRepo && (
@@ -530,9 +540,8 @@ export default function StartupRegister() {
                       type="text"
                       value={formData.tokenName}
                       onChange={(e) => setFormData({ ...formData, tokenName: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${
-                        errors.tokenName ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
-                      }`}
+                      className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${errors.tokenName ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
+                        }`}
                       placeholder="e.g. TechCoin"
                     />
                     {errors.tokenName && (
@@ -549,9 +558,8 @@ export default function StartupRegister() {
                       type="text"
                       value={formData.tokenSymbol}
                       onChange={(e) => setFormData({ ...formData, tokenSymbol: e.target.value.toUpperCase() })}
-                      className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${
-                        errors.tokenSymbol ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
-                      }`}
+                      className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${errors.tokenSymbol ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
+                        }`}
                       placeholder="TECH"
                       maxLength={5}
                     />
@@ -571,9 +579,8 @@ export default function StartupRegister() {
                       type="number"
                       value={formData.initialSupply}
                       onChange={(e) => setFormData({ ...formData, initialSupply: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${
-                        errors.initialSupply ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
-                      }`}
+                      className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none transition-all ${errors.initialSupply ? 'border-red-300 focus:border-red-500' : 'border-gray-200 focus:border-orange-500'
+                        }`}
                       placeholder="1000000"
                       min={1}
                     />
@@ -590,9 +597,8 @@ export default function StartupRegister() {
                     <select
                       value={formData.decimals}
                       onChange={(e) => setFormData({ ...formData, decimals: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl border-2 ${
-                        errors.decimals ? 'border-red-300' : 'border-gray-200'
-                      } focus:border-orange-500 focus:outline-none transition-all`}
+                      className={`w-full px-4 py-3 rounded-xl border-2 ${errors.decimals ? 'border-red-300' : 'border-gray-200'
+                        } focus:border-orange-500 focus:outline-none transition-all`}
                     >
                       <option value="6">6</option>
                       <option value="8">8</option>
@@ -709,12 +715,12 @@ export default function StartupRegister() {
                     <div className="font-semibold mb-2">Transaction Status:</div>
                     {txids.register && <div>✅ Startup registered: <span className="font-mono text-xs">{txids.register}</span></div>}
                     {txids.tokenize && <div>✅ Token created: <span className="font-mono text-xs">{txids.tokenize}</span></div>}
-                    {txids.metrics && <div>✅ Metrics initialized: <span className="font-mono text-xs">{txids.metrics}</span></div>}
-                    {txids.setToken && <div>✅ Token linked: <span className="font-mono text-xs">{txids.setToken}</span></div>}
+                    {/* Diğer txidler de buraya eklenebilir */}
                   </div>
                 )}
               </div>
 
+              {/* Düğmeler burada olabilir, örneğin */}
               <div className="flex space-x-4">
                 <button
                   onClick={prevStep}
@@ -726,62 +732,129 @@ export default function StartupRegister() {
                 <button
                   onClick={handleSubmit}
                   disabled={isSubmitting}
-                  className="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 text-white py-4 rounded-xl font-bold text-lg transition-all duration-300 transform hover:scale-105 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex-1 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white py-4 rounded-xl font-bold text-lg transition-all duration-300 transform hover:scale-105 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isSubmitting ? (
-                    <>
-                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      <span>Launching...</span>
-                    </>
+                    <div className="animate-spin w-6 h-6 border-2 border-white border-t-transparent rounded-full" />
                   ) : (
-                    <span>🚀 Launch Startup</span>
+                    <>
+                      <span>Confirm & Launch</span>
+                      <Rocket className="w-5 h-5" />
+                    </>
                   )}
                 </button>
               </div>
             </div>
           )}
+{/* STEP 4 (Success) */}
+{currentStep === 4 && (
+  <div className="p-8 text-center space-y-8">
+    <div className="space-y-4">
+      <div className="w-20 h-20 bg-gradient-to-r from-green-400 to-emerald-500 rounded-full flex items-center justify-center mx-auto animate-bounce">
+        <CheckCircle className="w-10 h-10 text-white" />
+      </div>
+      <h2 className="text-4xl font-bold text-gray-900">🎉 Congratulations!</h2>
+      <p className="text-xl text-gray-600">
+        Your startup has been successfully registered and tokenized on Stacks testnet!
+        {startupId !== null && (
+          <span className="block mt-2 font-semibold">
+            Startup ID: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{startupId}</span>
+          </span>
+        )}
+      </p>
+    </div>
 
-          {/* STEP 4 (Success) */}
-          {currentStep === 4 && (
-            <div className="p-8 text-center space-y-8">
-              <div className="space-y-4">
-                <div className="w-20 h-20 bg-gradient-to-r from-green-400 to-emerald-500 rounded-full flex items-center justify-center mx-auto animate-bounce">
-                  <CheckCircle className="w-10 h-10 text-white" />
-                </div>
-                <h2 className="text-4xl font-bold text-gray-900">🎉 Congratulations!</h2>
-                <p className="text-xl text-gray-600">
-                  Your startup has been successfully registered and tokenized on Stacks testnet!
-                  {startupId !== null && <span className="block mt-1">Startup ID: <span className="font-mono">{startupId}</span></span>}
-                </p>
-              </div>
-
-              <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl p-6 border border-green-200">
-                <h3 className="font-bold text-lg text-gray-900 mb-2">What&rsquo;s Next?</h3>
-                <div className="space-y-2 text-sm text-gray-700">
-                  <p>✅ Your startup is now live on Stacks testnet</p>
-                  <p>✅ Your tokens are ready for trading</p>
-                  <p>✅ You can start participating in competitions</p>
-                  <p>✅ Begin building your community</p>
-                </div>
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-4">
-                <button
-                  onClick={() => (window.location.href = '/dashboard')}
-                  className="flex-1 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white py-4 rounded-xl font-bold text-lg transition-all duration-300 transform hover:scale-105"
-                >
-                  Go to Dashboard
-                </button>
-                <button
-                  onClick={() => (window.location.href = '/')}
-                  className="flex-1 bg-white border-2 border-orange-300 hover:border-orange-400 text-orange-700 py-4 rounded-xl font-bold text-lg transition-all"
-                >
-                  Back to Home
-                </button>
-              </div>
+    {/* Transaction Details */}
+    {Object.values(txids).some(Boolean) && (
+      <div className="bg-gradient-to-r from-blue-50 to-cyan-50 rounded-xl p-6 border border-blue-200 text-left">
+        <h3 className="font-bold text-lg text-gray-900 mb-4">Transaction Details</h3>
+        <div className="space-y-2 text-sm">
+          {txids.register && (
+            <div className="flex items-center space-x-2">
+              <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+              <span className="text-gray-700">Startup Registered:</span>
+              <a 
+                href={`https://explorer.hiro.so/txid/${txids.register}?chain=testnet`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-xs text-blue-600 hover:text-blue-800 truncate"
+              >
+                {`${txids.register.slice(0, 8)}...${txids.register.slice(-8)}`}
+              </a>
+            </div>
+          )}
+          {txids.tokenize && (
+            <div className="flex items-center space-x-2">
+              <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+              <span className="text-gray-700">Token Created:</span>
+              <a 
+                href={`https://explorer.hiro.so/txid/${txids.tokenize}?chain=testnet`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-xs text-blue-600 hover:text-blue-800 truncate"
+              >
+                {`${txids.tokenize.slice(0, 8)}...${txids.tokenize.slice(-8)}`}
+              </a>
+            </div>
+          )}
+          {txids.metrics && (
+            <div className="flex items-center space-x-2">
+              <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+              <span className="text-gray-700">Metrics Initialized:</span>
+              <a 
+                href={`https://explorer.hiro.so/txid/${txids.metrics}?chain=testnet`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-xs text-blue-600 hover:text-blue-800 truncate"
+              >
+                {`${txids.metrics.slice(0, 8)}...${txids.metrics.slice(-8)}`}
+              </a>
+            </div>
+          )}
+          {txids.setToken && (
+            <div className="flex items-center space-x-2">
+              <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+              <span className="text-gray-700">Token Address Set:</span>
+              <a 
+                href={`https://explorer.hiro.so/txid/${txids.setToken}?chain=testnet`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-xs text-blue-600 hover:text-blue-800 truncate"
+              >
+                {`${txids.setToken.slice(0, 8)}...${txids.setToken.slice(-8)}`}
+              </a>
             </div>
           )}
         </div>
+      </div>
+    )}
+
+    <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl p-6 border border-green-200">
+      <h3 className="font-bold text-lg text-gray-900 mb-2">What&apos;s Next?</h3>
+      <div className="space-y-2 text-sm text-gray-700">
+        <p>✅ Your startup is now live on Stacks testnet</p>
+        <p>✅ Your tokens are ready for trading</p>
+        <p>✅ You can start participating in competitions</p>
+        <p>✅ Begin building your community</p>
+      </div>
+    </div>
+
+    <div className="flex flex-col sm:flex-row gap-4">
+      <button
+        onClick={() => (window.location.href = '/dashboard')}
+        className="flex-1 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white py-4 rounded-xl font-bold text-lg transition-all duration-300 transform hover:scale-105"
+      >
+        Go to Dashboard
+      </button>
+      <button
+        onClick={() => (window.location.href = '/')}
+        className="flex-1 bg-white border-2 border-orange-300 hover:border-orange-400 text-orange-700 py-4 rounded-xl font-bold text-lg transition-all"
+      >
+        Back to Home
+      </button>
+    </div>
+  </div>
+)}        </div>
       </div>
     </div>
   )

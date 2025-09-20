@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ComponentType } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { AppConfig, UserSession } from '@stacks/auth'
 import type { UserData } from '@stacks/auth'
 import {
@@ -39,6 +40,8 @@ import {
   getNotificationPreferences,
   setNotificationPreferences as saveNotificationPreferences,
   convertTimestamps,
+  getStartupProfile,
+  getLatestStartupByOwner,
 } from '@/lib/firebase/firestore'
 
 const appConfig = new AppConfig(['store_write', 'publish_data'])
@@ -143,6 +146,8 @@ export default function Dashboard() {
   const [savingNotifications, setSavingNotifications] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const searchParams = useSearchParams()
+  const startupIdParam = searchParams.get('startupId') ?? null
 
   useEffect(() => {
     if (userSession.isUserSignedIn()) {
@@ -157,92 +162,131 @@ export default function Dashboard() {
       setIsLoading(true)
       setError(null)
 
+      const fallbackStartup = FALLBACK_STARTUP
+      const fallbackMetrics = FALLBACK_METRICS
+
       try {
-        const profiles = await listStartupProfiles(1)
+        const ownerAddress = getPrimaryAddress(userData)
+
+        let selectedProfile: StartupProfile | null = null
+
+        if (startupIdParam) {
+          const profileById = await getStartupProfile(startupIdParam)
+          if (profileById) {
+            selectedProfile = profileById
+          }
+        }
+
+        if (!selectedProfile && ownerAddress) {
+          const latestByOwner = await getLatestStartupByOwner(ownerAddress)
+          if (latestByOwner) {
+            selectedProfile = latestByOwner
+          }
+        }
+
+        if (!selectedProfile) {
+          const profiles = await listStartupProfiles(1)
+          if (profiles.length > 0) {
+            selectedProfile = profiles[0]
+          }
+        }
+
         if (!isMounted) return
 
-        if (profiles.length > 0) {
-          const normalizedProfile = convertTimestamps<StartupProfile>(profiles[0])
-          const derivedPrice = normalizedProfile.score ? Number((normalizedProfile.score / 100000).toFixed(3)) : startupData.price
-          const derivedMarketCap = normalizedProfile.circulatingSupply && normalizedProfile.score
-            ? Math.round((normalizedProfile.circulatingSupply ?? 0) * (normalizedProfile.score / 100000))
-            : startupData.marketCap
+        if (!selectedProfile) {
+          setStartupData(fallbackStartup)
+          setMetrics(fallbackMetrics)
+          setStartupPosts([])
+          setNotificationPrefs(defaultNotificationPrefs)
+          setNotificationPrefsLoaded(true)
+          return
+        }
 
-          setStartupData((prev) => ({
-            ...prev,
-            id: normalizedProfile.id,
-            ownerAddress: normalizedProfile.ownerAddress ?? prev.ownerAddress,
-            name: normalizedProfile.name ?? prev.name,
-            description: normalizedProfile.description ?? prev.description,
-            githubRepo: normalizedProfile.github ?? prev.githubRepo,
-            website: normalizedProfile.website ?? prev.website,
-            twitter: normalizedProfile.twitter ?? prev.twitter,
-            tokenName: normalizedProfile.tokenName ?? prev.tokenName,
-            tokenSymbol: normalizedProfile.tokenSymbol ?? prev.tokenSymbol,
-            totalSupply: normalizedProfile.totalSupply ?? prev.totalSupply,
-            price: derivedPrice,
-            marketCap: derivedMarketCap,
-            holders: normalizedProfile.holders ?? prev.holders,
-            rank: normalizedProfile.rank ?? prev.rank,
-            score: normalizedProfile.score ?? prev.score,
-            verified: normalizedProfile.verified ?? prev.verified,
-          }))
+        const normalizedProfile = convertTimestamps<StartupProfile>(selectedProfile)
+        const derivedPrice = normalizedProfile.score
+          ? Number((normalizedProfile.score / 100000).toFixed(3))
+          : fallbackStartup.price
+        const derivedMarketCap = normalizedProfile.circulatingSupply && normalizedProfile.score
+          ? Math.round((normalizedProfile.circulatingSupply ?? 0) * (normalizedProfile.score / 100000))
+          : fallbackStartup.marketCap
 
-          const [snapshot, posts] = await Promise.all([
-            getLatestMetricSnapshot(normalizedProfile.id),
-            fetchStartupPosts(normalizedProfile.id, 3),
-          ])
+        setStartupData({
+          ...fallbackStartup,
+          id: normalizedProfile.id,
+          ownerAddress: normalizedProfile.ownerAddress ?? fallbackStartup.ownerAddress,
+          name: normalizedProfile.name ?? fallbackStartup.name,
+          description: normalizedProfile.description ?? fallbackStartup.description,
+          githubRepo: normalizedProfile.github ?? fallbackStartup.githubRepo,
+          website: normalizedProfile.website ?? fallbackStartup.website,
+          twitter: normalizedProfile.twitter ?? fallbackStartup.twitter,
+          tokenName: normalizedProfile.tokenName ?? fallbackStartup.tokenName,
+          tokenSymbol: normalizedProfile.tokenSymbol ?? fallbackStartup.tokenSymbol,
+          totalSupply: normalizedProfile.totalSupply ?? fallbackStartup.totalSupply,
+          price: derivedPrice,
+          marketCap: derivedMarketCap,
+          holders: normalizedProfile.holders ?? fallbackStartup.holders,
+          rank: normalizedProfile.rank ?? fallbackStartup.rank,
+          score: normalizedProfile.score ?? fallbackStartup.score,
+          verified: normalizedProfile.verified ?? fallbackStartup.verified,
+        })
 
+        const profileId = normalizedProfile.id
+        const [snapshot, posts] = await Promise.all([
+          getLatestMetricSnapshot(profileId),
+          fetchStartupPosts(profileId, 3),
+        ])
+
+        if (!isMounted) return
+
+        if (snapshot) {
+          const normalizedSnapshot = convertTimestamps<MetricSnapshot>(snapshot)
+          setMetrics({
+            github: {
+              commits: normalizedSnapshot.github.commits,
+              stars: normalizedSnapshot.github.stars,
+              forks: normalizedSnapshot.github.forks,
+              lastCommit: formatDateTime(normalizedSnapshot.updatedAt ?? normalizedSnapshot.createdAt),
+            },
+            social: {
+              twitterFollowers: normalizedSnapshot.twitter?.followers ?? fallbackMetrics.social.twitterFollowers,
+              linkedinFollowers: fallbackMetrics.social.linkedinFollowers,
+            },
+            platform: {
+              posts: normalizedSnapshot.traction?.users ?? fallbackMetrics.platform.posts,
+              demoViews: fallbackMetrics.platform.demoViews,
+            },
+          })
+        } else {
+          setMetrics(fallbackMetrics)
+        }
+
+        setStartupPosts(
+          posts.length ? posts.map((post) => convertTimestamps<StartupSocialPost>(post)) : [],
+        )
+
+        const prefsOwner = ownerAddress ?? normalizedProfile.ownerAddress ?? null
+        if (prefsOwner) {
+          const prefs = await getNotificationPreferences(prefsOwner)
           if (!isMounted) return
 
-          if (snapshot) {
-            const normalizedSnapshot = convertTimestamps<MetricSnapshot>(snapshot)
-            setMetrics((prev) => ({
-              github: {
-                commits: normalizedSnapshot.github.commits,
-                stars: normalizedSnapshot.github.stars,
-                forks: normalizedSnapshot.github.forks,
-                lastCommit: normalizedSnapshot.updatedAt ? formatDateTime(normalizedSnapshot.updatedAt) : prev.github.lastCommit,
-              },
-              social: {
-                twitterFollowers: normalizedSnapshot.twitter?.followers ?? prev.social.twitterFollowers,
-                linkedinFollowers: prev.social.linkedinFollowers,
-              },
-              platform: {
-                posts: normalizedSnapshot.traction?.users ?? prev.platform.posts,
-                demoViews: prev.platform.demoViews,
-              },
-            }))
-          }
-
-          if (posts.length) {
-            setStartupPosts(posts.map((post) => convertTimestamps<StartupSocialPost>(post)))
+          if (prefs) {
+            const normalizedPrefs = convertTimestamps<NotificationPreference>(prefs)
+            setNotificationPrefs({
+              allowEmail: normalizedPrefs.allowEmail,
+              allowPush: normalizedPrefs.allowPush,
+              email: normalizedPrefs.email ?? userData?.profile?.email ?? defaultNotificationPrefs.email,
+            })
           } else {
-            setStartupPosts([])
-          }
-
-          const address = getPrimaryAddress(userData) ?? normalizedProfile.ownerAddress ?? 'guest-user'
-          const prefs = await getNotificationPreferences(address)
-          if (isMounted) {
-            if (prefs) {
-              const normalizedPrefs = convertTimestamps<NotificationPreference>(prefs)
-              setNotificationPrefs({
-                allowEmail: normalizedPrefs.allowEmail,
-                allowPush: normalizedPrefs.allowPush,
-                email: normalizedPrefs.email ?? defaultNotificationPrefs.email,
-              })
-            } else {
-              setNotificationPrefs((prev) => ({
-                ...prev,
-                email: userData?.profile?.email ?? prev.email,
-              }))
-            }
-            setNotificationPrefsLoaded(true)
+            setNotificationPrefs({
+              ...defaultNotificationPrefs,
+              email: userData?.profile?.email ?? defaultNotificationPrefs.email,
+            })
           }
         } else {
-          setStartupPosts([])
-          setNotificationPrefsLoaded(true)
+          setNotificationPrefs({ ...defaultNotificationPrefs })
         }
+
+        setNotificationPrefsLoaded(true)
       } catch (err) {
         console.error('Failed to load dashboard data', err)
         if (isMounted) setError(err instanceof Error ? err.message : 'Unable to load dashboard data')
@@ -256,7 +300,7 @@ export default function Dashboard() {
     return () => {
       isMounted = false
     }
-  }, [userData])
+  }, [userData, startupIdParam])
 
   const notificationUserId = useMemo(() => (
     getPrimaryAddress(userData) ?? startupData.ownerAddress ?? 'guest-user'

@@ -65,6 +65,20 @@ export const listStartupProfiles = async (limitCount = 20) => {
   return snapshot.docs.map((docSnap) => docSnap.data() as StartupProfile)
 }
 
+export const getLatestStartupByOwner = async (ownerAddress: string) => {
+  const snapshot = await getDocs(
+    query(
+      getCollection('startups'),
+      where('ownerAddress', '==', ownerAddress),
+      orderBy('createdAt', 'desc'),
+      limit(1),
+    ),
+  )
+
+  if (snapshot.empty) return null
+  return snapshot.docs[0].data() as StartupProfile
+}
+
 /* ---------- Social posts & comments ---------- */
 export const addStartupPost = async (startupId: string, post: StartupSocialPost) => {
   const ref = getDocRef(`startups/${startupId}/posts/${post.id}`)
@@ -133,6 +147,24 @@ export const getLeaderboard = async (period: 'overall' | 'weekly' | 'monthly' = 
   )
 
   return snapshot.docs.map((docSnap) => docSnap.data() as LeaderboardEntry)
+}
+
+export const saveLeaderboardEntry = async (
+  period: 'overall' | 'weekly' | 'monthly',
+  entry: LeaderboardEntry,
+) => {
+  if (!entry.id) throw new Error('Leaderboard entry requires an id')
+  const ref = getDocRef(`leaderboards/${period}/entries/${entry.id}`)
+  const existing = await getDoc(ref)
+
+  const existingCreatedAt = existing.exists() ? existing.data()?.createdAt : undefined
+
+  const payload = pruneUndefined({
+    ...entry,
+    createdAt: existingCreatedAt ?? entry.createdAt ?? serverTimestamp(),
+  })
+
+  await setDoc(ref, withTimestamp(payload), { merge: true })
 }
 
 /* ---------- Order book snapshots ---------- */
